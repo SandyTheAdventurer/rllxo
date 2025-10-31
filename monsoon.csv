@@ -1,0 +1,177 @@
+PARAMETER,YEAR,JUN,JUL,AUG,SEP
+Soil Moisture ,1981,0.58,0.71,0.76,0.84
+Soil Moisture ,1982,0.59,0.67,0.66,0.63
+Soil Moisture ,1983,0.53,0.59,0.78,0.78
+Soil Moisture ,1984,0.57,0.65,0.7,0.64
+Soil Moisture ,1985,0.63,0.66,0.69,0.62
+Soil Moisture ,1986,0.57,0.61,0.66,0.61
+Soil Moisture ,1987,0.53,0.59,0.63,0.62
+Soil Moisture ,1988,0.53,0.63,0.76,0.79
+Soil Moisture ,1989,0.53,0.69,0.76,0.72
+Soil Moisture ,1990,0.62,0.62,0.69,0.69
+Soil Moisture ,1991,0.61,0.68,0.71,0.66
+Soil Moisture ,1992,0.57,0.61,0.72,0.69
+Soil Moisture ,1993,0.53,0.58,0.67,0.73
+Soil Moisture ,1994,0.54,0.58,0.64,0.63
+Soil Moisture ,1995,0.54,0.66,0.75,0.81
+Soil Moisture ,1996,0.56,0.62,0.69,0.83
+Soil Moisture ,1997,0.53,0.59,0.61,0.66
+Soil Moisture ,1998,0.53,0.59,0.74,0.77
+Soil Moisture ,1999,0.53,0.57,0.61,0.62
+Soil Moisture ,2000,0.62,0.69,0.72,0.77
+Soil Moisture ,2001,0.59,0.57,0.67,0.63
+Soil Moisture ,2002,0.58,0.59,0.66,0.6
+Soil Moisture ,2003,0.54,0.65,0.7,0.65
+Soil Moisture ,2004,0.53,0.61,0.62,0.63
+Soil Moisture ,2005,0.54,0.7,0.79,0.85
+Soil Moisture ,2006,0.59,0.61,0.71,0.72
+Soil Moisture ,2007,0.58,0.66,0.7,0.86
+Soil Moisture ,2008,0.53,0.54,0.76,0.84
+Soil Moisture ,2009,0.57,0.56,0.6,0.72
+Soil Moisture ,2010,0.56,0.72,0.77,0.86
+Soil Moisture ,2011,0.52,0.6,0.64,0.66
+Soil Moisture ,2012,0.54,0.62,0.64,0.67
+Soil Moisture ,2013,0.59,0.65,0.7,0.74
+Soil Moisture ,2014,0.52,0.58,0.61,0.75
+Soil Moisture ,2015,0.54,0.53,0.56,0.62
+Soil Moisture ,2016,0.57,0.61,0.63,0.7
+Soil Moisture ,2017,0.58,0.61,0.63,0.67
+Soil Moisture ,2018,0.53,0.57,0.59,0.59
+Soil Moisture ,2019,0.52,0.54,0.61,0.63
+Soil Moisture ,2020,0.57,0.73,0.83,0.86
+Soil Moisture ,2021,0.55,0.68,0.7,0.79
+Soil Moisture ,2022,0.54,0.7,0.78,0.78
+Soil Moisture ,2023,0.52,0.61,0.66,0.67
+Soil Moisture ,2024,0.58,0.65,0.7,0.82
+Precipitation,1981,247.83,145.41,167.08,281.74
+Precipitation,1982,171.72,183.73,55.79,172.66
+Precipitation,1983,82.15,196.73,241.14,127.19
+Precipitation,1984,130.77,198.5,97.65,136.9
+Precipitation,1985,223.86,172.4,67.17,34.23
+Precipitation,1986,159.15,88.06,153.98,77.26
+Precipitation,1987,69.51,109.53,161.52,63.97
+Precipitation,1988,69.51,276.32,167.23,134.99
+Precipitation,1989,97.95,401.15,114.36,89.2
+Precipitation,1990,110.46,100.28,206.93,96.28
+Precipitation,1991,191.38,140.35,164.13,137.68
+Precipitation,1992,116.42,106.05,234.68,81.78
+Precipitation,1993,61.59,153.63,193.31,116.37
+Precipitation,1994,79.76,121.96,174.97,39.27
+Precipitation,1995,118.63,203.01,193.75,147.3
+Precipitation,1996,110.36,152.34,298.12,148.55
+Precipitation,1997,60.7,152.56,132.67,131.72
+Precipitation,1998,64.58,191.29,195.15,210.89
+Precipitation,1999,38.4,105.79,119.48,112.73
+Precipitation,2000,242.45,72.38,384.09,68.2
+Precipitation,2001,156.75,68.08,182.03,149.87
+Precipitation,2002,127.59,83.46,182.14,35.78
+Precipitation,2003,77.15,206.59,144.91,74.4
+Precipitation,2004,31.67,197.31,52.31,129.85
+Precipitation,2005,97.66,324.51,140.78,193.57
+Precipitation,2006,104.56,157,155.96,216.28
+Precipitation,2007,267.66,88.43,234.57,232.95
+Precipitation,2008,49.54,110.21,351.68,167.24
+Precipitation,2009,89.74,49.22,258.68,158.39
+Precipitation,2010,119.33,301.17,201.59,188.18
+Precipitation,2011,42.41,169.6,180.77,49
+Precipitation,2012,86.92,189.77,117.38,115.53
+Precipitation,2013,134.75,182.53,132.17,179.66
+Precipitation,2014,45.79,145.44,247.03,86.39
+Precipitation,2015,63.97,52.85,93.03,156.43
+Precipitation,2016,128.21,151.38,81.78,269.64
+Precipitation,2017,138.47,118.27,136.47,179
+Precipitation,2018,64.8,93.45,116.65,92.13
+Precipitation,2019,50.88,77.63,130.99,167.93
+Precipitation,2020,148.37,274.24,182.17,245.55
+Precipitation,2021,105.61,233.8,153.67,204.52
+Precipitation,2022,80.74,291.15,141.84,156.74
+Precipitation,2023,41.79,263.6,22.6,184.94
+Precipitation,2024,127.9,170.82,217.43,230.58
+Specific Humidity,1981,16.32,16.84,16.6,17.34
+Specific Humidity,1982,15.57,16.43,16.04,15.87
+Specific Humidity,1983,14.52,16.19,17.35,17.28
+Specific Humidity,1984,15.06,16.45,16.07,15.74
+Specific Humidity,1985,16.4,16.05,16.25,15.65
+Specific Humidity,1986,15.94,15.78,16.12,15.94
+Specific Humidity,1987,15.76,15.66,16.82,16.46
+Specific Humidity,1988,14.94,16.73,17.52,17.64
+Specific Humidity,1989,14.88,16.81,16.55,16.5
+Specific Humidity,1990,16.71,15.87,16.66,16.68
+Specific Humidity,1991,16.67,16.8,16.53,16.38
+Specific Humidity,1992,16.01,16.42,16.51,15.79
+Specific Humidity,1993,14.44,16.1,16.62,16.78
+Specific Humidity,1994,15.52,15.85,16.16,15.25
+Specific Humidity,1995,14.71,16.83,17.39,16.85
+Specific Humidity,1996,15.89,16.29,16.77,17.11
+Specific Humidity,1997,14.52,16.2,16.01,16.82
+Specific Humidity,1998,15.15,16.61,18.01,17.64
+Specific Humidity,1999,14.85,15.85,16.09,16.21
+Specific Humidity,2000,16.58,16.55,16.76,16.83
+Specific Humidity,2001,15.51,15.38,16.61,17.01
+Specific Humidity,2002,16.66,15.87,16.51,15.6
+Specific Humidity,2003,14.01,16.84,16.87,16.84
+Specific Humidity,2004,15.39,16.42,16.12,16.77
+Specific Humidity,2005,16.06,17.16,17.3,17.62
+Specific Humidity,2006,16.69,16.25,16.7,17.08
+Specific Humidity,2007,16.95,17.12,17.08,17.67
+Specific Humidity,2008,15.06,15.27,17.22,16.86
+Specific Humidity,2009,16.12,15.82,16.2,17.36
+Specific Humidity,2010,15.87,17.21,17.67,17.52
+Specific Humidity,2011,15.09,16.28,16.83,16.69
+Specific Humidity,2012,13.97,16.31,16.5,16.84
+Specific Humidity,2013,16.41,16.5,16.71,17.15
+Specific Humidity,2014,14.65,16.04,16.37,16.78
+Specific Humidity,2015,15.28,15.03,16.03,16.65
+Specific Humidity,2016,16.41,16.74,16.6,16.74
+Specific Humidity,2017,16.28,16.31,16.57,17.34
+Specific Humidity,2018,15.77,15.58,15.84,15.44
+Specific Humidity,2019,15.18,16.26,16.78,17.28
+Specific Humidity,2020,16.59,17.69,18.05,18.04
+Specific Humidity,2021,16.15,17.52,17.35,17.57
+Specific Humidity,2022,15.74,17.28,17.57,17.54
+Specific Humidity,2023,13.94,16.7,16.9,17.58
+Specific Humidity,2024,16.91,17.18,18.18,17.55
+Temperature,1981,27.44,24.93,24.05,23.92
+Temperature,1982,27.03,24.92,24.88,24.39
+Temperature,1983,29.25,25.79,24.43,24.03
+Temperature,1984,27.33,24.51,24.46,24.5
+Temperature,1985,25.68,24.23,24.2,24.45
+Temperature,1986,26.7,25.36,24.67,25.3
+Temperature,1987,28.62,25.68,25.02,25.84
+Temperature,1988,28.29,25.51,24.71,24.38
+Temperature,1989,26.7,25.12,24.01,23.9
+Temperature,1990,25.81,25.13,24.51,24.4
+Temperature,1991,27.49,24.65,24.28,24.93
+Temperature,1992,28.42,25.4,24.13,24.11
+Temperature,1993,29.08,25.62,24.62,24.16
+Temperature,1994,27.62,25.49,24.86,24.64
+Temperature,1995,29.14,24.87,24.64,24.3
+Temperature,1996,27.61,25.34,24.57,24.27
+Temperature,1997,28.86,25.96,25.3,24.66
+Temperature,1998,29.45,26.18,25.18,24.48
+Temperature,1999,27.02,25.87,25.17,24.98
+Temperature,2000,25.67,24.91,24.46,24.54
+Temperature,2001,26.77,26.48,24.55,25.05
+Temperature,2002,27.41,26.78,24.77,26.1
+Temperature,2003,29.55,25.32,24.77,24.94
+Temperature,2004,27.56,25.16,25.44,25.1
+Temperature,2005,28.36,25.03,24.34,24.39
+Temperature,2006,26.81,25.83,24.38,24.69
+Temperature,2007,27.11,25.34,24.73,24.17
+Temperature,2008,27.46,27.18,24.55,24.24
+Temperature,2009,27.28,26.29,26.24,25.16
+Temperature,2010,28.81,24.95,24.87,24.26
+Temperature,2011,28.03,25.82,25.12,24.93
+Temperature,2012,28.83,25.62,25.11,24.77
+Temperature,2013,26.33,24.88,24.53,24.34
+Temperature,2014,30.34,26.54,25.95,24.31
+Temperature,2015,28.09,28.21,26.61,25.47
+Temperature,2016,27.08,25.55,25.46,24.07
+Temperature,2017,27.41,26.07,25.28,25.06
+Temperature,2018,27.6,26.17,25.42,25.71
+Temperature,2019,30.03,26.81,25.61,25.21
+Temperature,2020,27.26,25.07,24.71,24.53
+Temperature,2021,27.09,25.45,24.89,24.56
+Temperature,2022,27.98,25.11,24.77,24.65
+Temperature,2023,30.65,25.8,25.79,25.19
+Temperature,2024,27.03,25.44,25.63,24.63
