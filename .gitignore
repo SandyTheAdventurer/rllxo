@@ -1,4 +1,6 @@
 pairplot.pdf
-predict.pdf
+predict*.pdf
 output.png
+papers/
+dataset/
 /__pycache__/

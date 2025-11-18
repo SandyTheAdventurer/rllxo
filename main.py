@@ -4,15 +4,33 @@ import random
 import math
 import copy
 import operator
+import time
 from typing import Callable, Dict, List, Mapping, Tuple
+import warnings
+
 import numpy as np
 import sympy as sp
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from tqdm.auto import tqdm  # Changed from trange to tqdm
+from scipy.optimize import minimize
 
-random.seed(0)
-np.random.seed(0)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+DEFAULT_SEED = 0
+
+def set_global_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if torch.backends.cudnn.is_available():
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+set_global_seed(DEFAULT_SEED)
 
 # Set device for PyTorch operations
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -66,6 +84,9 @@ SYMPY_UNARY = {name: DEFAULT_SYMPY_UNARY[name] for name in UNARY_FUNCS}
 ALL_UNARY = list(UNARY_FUNCS.keys())
 
 ALL_BINARY = list(BINARY_FUNCS.keys())
+
+def get_selector_feature_dim(base_dim: int = 10) -> int:
+    return base_dim + len(ALL_UNARY) + len(ALL_BINARY)
 
 VAR_NAMES = ['x']
 VAR_SYMBOLS = {name: sp.Symbol(name) for name in VAR_NAMES}
@@ -324,10 +345,19 @@ def fitness(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray, complexi
 
 
 # Selection: tournament
-def tournament_select(pop: List[Node], scores: List[float], k=3) -> Node:
-    selected_idx = random.sample(range(len(pop)), k)
-    best = min(selected_idx, key=lambda i: scores[i])
-    return pop[best].clone()
+def tournament_select(pop: List[Node], scores: List[float], k=3, timeout=10.0) -> Node:
+    if not pop:
+        raise ValueError("Population must contain at least one individual.")
+    deadline = time.perf_counter() + timeout
+    sample_size = min(k, len(pop))
+    while True:
+        try:
+            selected_idx = random.sample(range(len(pop)), sample_size)
+            best = min(selected_idx, key=lambda i: scores[i])
+            return pop[best].clone()
+        except Exception:
+            if time.perf_counter() >= deadline:
+                return random.choice(pop).clone()
 
 
 # Neural network that learns to select good subtree crossover points using A2C.
@@ -679,10 +709,9 @@ def run_ga(
     mlp_hidden_dim=64,
     mlp_activation='relu',
     mlp_dropout=0.0,
-    use_critic=True,  # NEW: Option to disable critic
+    use_critic=True,
     stopping_metric='mse',
     stopping_threshold=None,
-    # Additional customization options
     complexity_coef=1e-3,
     inclusion_coef=1.0,
     prob_const=0.3,
@@ -692,20 +721,20 @@ def run_ga(
     temperature=0.5,
     critic_weight=0.5,
     entropy_weight=0.01,
+    opt_constants=False,  # Renamed to avoid shadowing the function
+    const_opt_freq=5,
+    const_opt_method='L-BFGS-B',
+    const_opt_maxiter=50,
     verbose=False,
     print_freq=1,
-    seed=None,
+    seed=DEFAULT_SEED,
     metrics_callback=None
 ):
     global subtree_selector, selector_optimizer
     
-    # Set random seed if provided
-    if seed is not None:
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(seed)
+    if seed is None:
+        seed = DEFAULT_SEED
+    set_global_seed(seed)
     
     inputs, resolved_names = prepare_inputs(x, var_names)
     set_variables(resolved_names)
@@ -728,6 +757,16 @@ def run_ga(
         UNARY_FUNCS = dict(DEFAULT_UNARY_FUNCS)
         SYMPY_UNARY = {name: DEFAULT_SYMPY_UNARY[name] for name in UNARY_FUNCS}
         ALL_UNARY = list(UNARY_FUNCS.keys())
+    
+    init_max_depth = max(1, max_init_depth)
+    pop = [
+        random_tree_custom(
+            max_depth=random.randint(1, init_max_depth),
+            prob_const=prob_const,
+            const_range=const_range,
+        )
+        for _ in range(pop_size)
+    ]
     
     # Initialize subtree selector
     if use_learned_crossover:
@@ -768,40 +807,55 @@ def run_ga(
     if y.shape[0] != n_samples:
         raise ValueError("y must have the same length as the input samples.")
 
-    # Determine print frequency
-    if print_freq is None:
-        print_freq = max(1, gens // 10)
-    
-    # Store const_range for use in random_tree
-    global CONST_RANGE, PROB_CONST
-    CONST_RANGE = const_range
-    PROB_CONST = prob_const
+    def evaluate_r2(individual):
+        try:
+            preds = individual.evaluate(inputs)
+            if np.any(np.isnan(preds)) or np.any(np.isinf(preds)):
+                return None
+            ss_res = np.sum((y - preds) ** 2)
+            ss_tot = np.sum((y - np.mean(y)) ** 2)
+            return 1 - (ss_res / ss_tot) if ss_tot > 0 else None
+        except Exception:
+            return None
 
-    # initialize population
-    pop = [random_tree_custom(max_init_depth, prob_const, const_range) for _ in range(pop_size)]
     best = None
     best_score = float('inf')
-    
-    # Store A2C hyperparameters for update_selector
-    global A2C_PARAMS
-    A2C_PARAMS = {
-        'critic_weight': critic_weight,
-        'entropy_weight': entropy_weight,
-        'temperature': temperature
-    }
+    best_r2 = None
 
-    for gen in range(gens):
+    gen_iterator = tqdm(range(gens), desc="GA generations", unit="gen")  # Changed from trange
+    for gen in gen_iterator:
+        # Optimize constants periodically
+        if opt_constants and gen > 0 and gen % const_opt_freq == 0:  # Changed variable name
+            if verbose:
+                print(f"\nOptimizing constants at generation {gen+1}...")
+            for i in range(len(pop)):
+                pop[i] = optimize_constants(pop[i], inputs, y, 
+                                           method=const_opt_method,
+                                           maxiter=const_opt_maxiter)
+        
         scores = [fitness_custom(ind, inputs, y, complexity_coef, inclusion_coef) for ind in pop]
         
         # Update selector every few generations
         if use_learned_crossover and gen > 0 and gen % selector_update_freq == 0:
-            update_selector_custom(pop, scores, inputs, y, complexity_coef, inclusion_coef)
+            update_selector_custom(
+                pop,
+                scores,
+                inputs,
+                y,
+                complexity_coef,
+                inclusion_coef,
+                critic_weight=critic_weight,
+                entropy_weight=entropy_weight,
+            )
         
         # track best
         for ind, s in zip(pop, scores):
             if s < best_score:
                 best_score = s
                 best = ind.clone()
+                r2_val = evaluate_r2(best)
+                if r2_val is not None:
+                    best_r2 = r2_val
         
         # Check stopping criterion
         if stopping_threshold is not None and best is not None:
@@ -835,8 +889,14 @@ def run_ga(
         # produce rest
         while len(next_pop) < pop_size:
             if random.random() < crossover_rate:
-                parent1 = tournament_select(pop, scores, tournament_k)
-                parent2 = tournament_select(pop, scores, tournament_k)
+                try:
+                    parent1 = tournament_select(pop, scores, tournament_k)
+                except RecursionError:
+                    parent1 = random.choice(pop).clone()
+                try:
+                    parent2 = tournament_select(pop, scores, tournament_k)
+                except RecursionError:
+                    parent2 = random.choice(pop).clone()
                 child1, child2 = learned_subtree_crossover_custom(
                     parent1, parent2, use_learned=use_learned_crossover, temperature=temperature
                 )
@@ -849,7 +909,10 @@ def run_ga(
                 if len(next_pop) < pop_size:
                     next_pop.append(child2)
             else:
-                parent = tournament_select(pop, scores, tournament_k)
+                try:
+                    parent = tournament_select(pop, scores, tournament_k)
+                except RecursionError:
+                    parent = random.choice(pop).clone()
                 child = parent
                 if random.random() < mutation_rate:
                     child = subtree_mutation_custom(child, max_depth, prob_const, const_range)
@@ -884,7 +947,10 @@ def run_ga(
                 r2 = float("nan")
             metrics_callback(gen, float(r2))
 
-    return best, best_score
+    if best is not None and best_r2 is None:
+        best_r2 = evaluate_r2(best)
+
+    return best, best_r2
 
 
 # Custom versions with parameters
@@ -1007,8 +1073,8 @@ def learned_subtree_crossover_custom(a: Node, b: Node, use_learned=True, tempera
     return new_a, new_b
 
 
-def update_selector_custom(pop: List[Node], scores: List[float], inputs, y, complexity_coef=1e-3, inclusion_coef=1.0):
-    """Update the subtree selector using A2C (or policy gradient if no critic)."""
+def update_selector_custom(pop: List[Node], scores: List[float], inputs, y, complexity_coef=1e-3,
+                           inclusion_coef=1.0, critic_weight=0.5, entropy_weight=0.01):
     global subtree_selector, selector_optimizer, crossover_history, A2C_PARAMS
     
     if not crossover_history or subtree_selector is None:
@@ -1054,18 +1120,25 @@ def update_selector_custom(pop: List[Node], scores: List[float], inputs, y, comp
     # Get log probabilities of selected actions
     log_probs_a = torch.log_softmax(action_logits_a, dim=0)
     log_probs_b = torch.log_softmax(action_logits_b, dim=0)
-    
-    selected_log_probs_a = torch.stack([log_probs_a[record['a_idx']] for record in crossover_history])
-    selected_log_probs_b = torch.stack([log_probs_b[record['b_idx']] for record in crossover_history])
-    
+    try:
+        selected_log_probs_a = torch.stack([log_probs_a[record['a_idx']] for record in crossover_history])
+        selected_log_probs_b = torch.stack([log_probs_b[record['b_idx']] for record in crossover_history])
+    except IndexError:
+        selected_log_probs_a = torch.zeros(len(crossover_history), device=DEVICE)
+        selected_log_probs_b = torch.zeros(len(crossover_history), device=DEVICE)
+
     # Combine log probabilities
     selected_log_probs = selected_log_probs_a + selected_log_probs_b
     
     # Compute advantages based on whether critic is enabled
     if subtree_selector.use_critic and values_a is not None and values_b is not None:
         # A2C: Advantages = R - V(s)
-        selected_values_a = torch.stack([values_a[record['a_idx']] for record in crossover_history])
-        selected_values_b = torch.stack([values_b[record['b_idx']] for record in crossover_history])
+        try:
+            selected_values_a = torch.stack([values_a[record['a_idx']] for record in crossover_history])
+            selected_values_b = torch.stack([values_b[record['b_idx']] for record in crossover_history])
+        except IndexError:
+            selected_values_a = torch.zeros(len(crossover_history), device=DEVICE)
+            selected_values_b = torch.zeros(len(crossover_history), device=DEVICE)
         selected_values = (selected_values_a + selected_values_b) / 2.0
         
         advantages = rewards_tensor - selected_values.detach()
@@ -1076,8 +1149,7 @@ def update_selector_custom(pop: List[Node], scores: List[float], inputs, y, comp
         # Critic loss: MSE between predicted values and actual rewards
         critic_loss = torch.mean((rewards_tensor - selected_values) ** 2)
         
-        # Get A2C hyperparameters
-        critic_weight = A2C_PARAMS['critic_weight']
+        critic_weight_local = critic_weight
     else:
         # Pure policy gradient (REINFORCE): Advantages = R (no baseline)
         advantages = rewards_tensor
@@ -1087,10 +1159,9 @@ def update_selector_custom(pop: List[Node], scores: List[float], inputs, y, comp
         
         # No critic loss
         critic_loss = torch.tensor(0.0, device=DEVICE)
-        critic_weight = 0.0
+        critic_weight_local = 0.0
     
-    # Get entropy weight
-    entropy_weight = A2C_PARAMS['entropy_weight']
+    entropy_weight_local = entropy_weight
     
     # Add entropy bonus to encourage exploration
     probs_a = torch.softmax(action_logits_a, dim=0)
@@ -1099,7 +1170,7 @@ def update_selector_custom(pop: List[Node], scores: List[float], inputs, y, comp
     entropy_b = -torch.sum(probs_b * torch.log(probs_b + 1e-10))
     entropy_loss = -(entropy_a + entropy_b) / 2.0
     
-    total_loss = actor_loss + critic_weight * critic_loss + entropy_weight * entropy_loss
+    total_loss = actor_loss + critic_weight_local * critic_loss + entropy_weight_local * entropy_loss
     
     # Backpropagation
     if not torch.isnan(total_loss) and not torch.isinf(total_loss):
@@ -1110,6 +1181,52 @@ def update_selector_custom(pop: List[Node], scores: List[float], inputs, y, comp
     
     # Clear history
     crossover_history.clear()
+
+
+def optimize_constants(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray, 
+                      method='L-BFGS-B', maxiter=50) -> Node:
+    """Optimize constants in the tree using numerical optimization while keeping structure fixed."""
+    # Collect all constant nodes
+    const_nodes = [node for node in ind.all_nodes() if isinstance(node, Const)]
+    
+    if not const_nodes:
+        return ind  # No constants to optimize
+    
+    # Extract initial values
+    initial_values = np.array([node.value for node in const_nodes])
+    
+    # Define objective function (MSE)
+    def objective(const_values):
+        # Temporarily update constant values
+        for node, val in zip(const_nodes, const_values):
+            node.value = float(val)
+        
+        try:
+            y_pred = ind.evaluate(inputs)
+            if np.any(np.isinf(y_pred)) or np.any(np.isnan(y_pred)):
+                return 1e10  # Large penalty for invalid predictions
+            mse = float(np.mean((y - y_pred)**2))
+            return mse
+        except Exception:
+            return 1e10
+    
+    # Optimize
+    try:
+        result = minimize(
+            objective,
+            initial_values,
+            method=method,
+            options={'maxiter': maxiter, 'disp': False}
+        )
+        
+        # Update constants with optimized values
+        if result.success:
+            for node, val in zip(const_nodes, result.x):
+                node.value = float(val)
+    except Exception:
+        pass  # If optimization fails, keep original values
+    
+    return ind
 
 
 def example():
@@ -1123,7 +1240,7 @@ def example():
         'y': np.linspace(0, 2, num_points),
     }
     Y = target(inputs['x'], inputs['y'])
-    best, score = run_ga(
+    best, best_r2 = run_ga(
         inputs,
         Y,
         pop_size=200,
@@ -1140,7 +1257,6 @@ def example():
         transformer_layers=2,
         stopping_metric='mse',
         stopping_threshold=0.01,
-        # NEW: Demonstrate new options
         complexity_coef=5e-4,
         inclusion_coef=0.5,
         prob_const=0.35,
@@ -1150,6 +1266,9 @@ def example():
         temperature=0.7,
         critic_weight=0.6,
         entropy_weight=0.02,
+        opt_constants=True,         # Changed parameter name
+        const_opt_freq=10,
+        const_opt_maxiter=30,
         verbose=True,
         seed=42,
     )
@@ -1161,7 +1280,7 @@ def example():
         sym_expr = None
 
     print("\nBest expression (tree):", best.to_string())
-    print("Score:", score)
+    print("Returned R²:", best_r2)
     print("Sympy simplified:", sym_expr)
     # use sympy-lambdified function for final MSE
     if sym_expr is not None:
@@ -1175,10 +1294,10 @@ def example():
     # Calculate R²
     ss_res = np.sum((Y - preds)**2)
     ss_tot = np.sum((Y - np.mean(Y))**2)
-    r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+    final_r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
     
     print("MSE:", mse)
-    print("R²:", r2)
+    print("R²:", final_r2)
     
     # show a few example points
     step = max(1, len(Y) // 5)
