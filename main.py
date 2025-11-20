@@ -498,6 +498,23 @@ def extract_subtree_features(node: Node, parent: Node, depth_from_root: int,
     features.append(1.0 if parent is None else 0.0)  # Is root
     features.append(1.0 if isinstance(parent, Unary) else 0.0)
     features.append(1.0 if isinstance(parent, Binary) else 0.0)
+
+    # Specific operator features
+    unary_one_hot = [0.0] * len(ALL_UNARY)
+    if isinstance(node, Unary):
+        try:
+            unary_one_hot[ALL_UNARY.index(node.func_name)] = 1.0
+        except ValueError:
+            pass
+    features.extend(unary_one_hot)
+
+    binary_one_hot = [0.0] * len(ALL_BINARY)
+    if isinstance(node, Binary):
+        try:
+            binary_one_hot[ALL_BINARY.index(node.func_name)] = 1.0
+        except ValueError:
+            pass
+    features.extend(binary_one_hot)
     
     return torch.tensor(features, dtype=torch.float32, device=DEVICE)
 
@@ -771,7 +788,7 @@ def run_ga(
     # Initialize subtree selector
     if use_learned_crossover:
         subtree_selector = SubtreeSelector(
-            feature_dim=10, 
+            feature_dim=get_selector_feature_dim(),
             hidden_dim=mlp_hidden_dim,
             use_transformer=use_transformer,
             num_heads=transformer_heads,

@@ -28,37 +28,37 @@ FUNCTION_SPECS = [
         "id": 1,
         "func": f1,
         "expr": "x**3 + x**2 + x",
-        "variables": [{"name": "x", "sampler": uniform_sampler(-2.0, 2.0)}],
+        "variables": [{"name": "x", "sampler": uniform_sampler(-5.0, 5.0)}],
     },
     {
         "id": 2,
         "func": f2,
         "expr": "x**4 + x**3 + x**2 + x",
-        "variables": [{"name": "x", "sampler": uniform_sampler(-1.8, 1.8)}],
+        "variables": [{"name": "x", "sampler": uniform_sampler(-5.0, 5.0)}],
     },
     {
         "id": 3,
         "func": f3,
         "expr": "x**5 + x**4 + x**3 + x**2 + x",
-        "variables": [{"name": "x", "sampler": uniform_sampler(-1.5, 1.5)}],
+        "variables": [{"name": "x", "sampler": uniform_sampler(-5.0, 5.0)}],
     },
     {
         "id": 4,
         "func": f4,
         "expr": "x**6 + x**5 + x**4 + x**3 + x**2 + x",
-        "variables": [{"name": "x", "sampler": uniform_sampler(-1.2, 1.2)}],
+        "variables": [{"name": "x", "sampler": uniform_sampler(-5.0, 5.0)}],
     },
     {
         "id": 5,
         "func": f5,
         "expr": "np.sin(x**2)*np.cos(x) - 1",
-        "variables": [{"name": "x", "sampler": uniform_sampler(-3.0, 3.0)}],
+        "variables": [{"name": "x", "sampler": uniform_sampler(-5.0, 5.0)}],
     },
     {
         "id": 6,
         "func": f6,
         "expr": "np.sin(x) + np.sin(x + x**2)",
-        "variables": [{"name": "x", "sampler": uniform_sampler(-2 * np.pi, 2 * np.pi)}],
+        "variables": [{"name": "x", "sampler": uniform_sampler(-5.0, 5.0)}],
     },
     {
         "id": 7,
@@ -70,15 +70,15 @@ FUNCTION_SPECS = [
         "id": 8,
         "func": f8,
         "expr": "np.sqrt(np.abs(x))",
-        "variables": [{"name": "x", "sampler": uniform_sampler(-10.0, 10.0)}],
+        "variables": [{"name": "x", "sampler": uniform_sampler(-5.0, 5.0)}],
     },
     {
         "id": 9,
         "func": f9,
         "expr": "np.sin(x) + np.sin(y**2)",
         "variables": [
-            {"name": "x", "sampler": uniform_sampler(-np.pi, np.pi)},
-            {"name": "y", "sampler": uniform_sampler(-np.pi, np.pi)},
+            {"name": "x", "sampler": uniform_sampler(-5.0, 5.0)},
+            {"name": "y", "sampler": uniform_sampler(-5.0, 5.0)},
         ],
     },
     {
@@ -86,8 +86,8 @@ FUNCTION_SPECS = [
         "func": f10,
         "expr": "2*np.sin(x)*np.cos(y)",
         "variables": [
-            {"name": "x", "sampler": uniform_sampler(-np.pi, np.pi)},
-            {"name": "y", "sampler": uniform_sampler(-np.pi, np.pi)},
+            {"name": "x", "sampler": uniform_sampler(-5.0, 5.0)},
+            {"name": "y", "sampler": uniform_sampler(-5.0, 5.0)},
         ],
     },
     {
@@ -96,7 +96,7 @@ FUNCTION_SPECS = [
         "expr": "x**y",
         "variables": [
             {"name": "x", "sampler": uniform_sampler(0.1, 5.0)},
-            {"name": "y", "sampler": uniform_sampler(0.1, 3.0)},
+            {"name": "y", "sampler": uniform_sampler(0.1, 5.0)},
         ],
     },
     {
@@ -104,8 +104,8 @@ FUNCTION_SPECS = [
         "func": f12,
         "expr": "x**4 - x**3 + (y**2)/2 - y",
         "variables": [
-            {"name": "x", "sampler": uniform_sampler(-3.0, 3.0)},
-            {"name": "y", "sampler": uniform_sampler(-3.0, 3.0)},
+            {"name": "x", "sampler": uniform_sampler(-5.0, 5.0)},
+            {"name": "y", "sampler": uniform_sampler(-5.0, 5.0)},
         ],
     },
 ]

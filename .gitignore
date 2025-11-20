@@ -2,5 +2,6 @@ pairplot.pdf
 predict*.pdf
 output.png
 papers/
+.vscode/
 dataset/
 /__pycache__/
