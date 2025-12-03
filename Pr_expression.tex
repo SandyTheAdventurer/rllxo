@@ -1,0 +1,100 @@
+\documentclass{article}
+\usepackage{amsmath}
+\usepackage{pdflscape}
+\usepackage{geometry}
+\usepackage{listings}
+\geometry{a4paper,margin=1.5cm}
+\begin{document}
+\section*{Hyperparameters}
+\begin{itemize}
+\item \textbf{Population Size:} 2000
+\item \textbf{Generations:} 100
+\item \textbf{Max Initial Depth:} 4
+\item \textbf{Max Depth:} 10
+\item \textbf{Crossover Rate:} 0.85
+\item \textbf{Mutation Rate:} 0.2
+\item \textbf{Tournament Size:} 5
+\item \textbf{Elitism:} 15
+\item \textbf{Use Learned Crossover:} True
+\item \textbf{Selector Learning Rate:} 5.0e-04
+\item \textbf{Use Transformer:} False
+\item \textbf{Transformer Heads:} 8
+\item \textbf{Transformer Layers:} 4
+\item \textbf{MLP Layers:} 15
+\item \textbf{MLP Hidden Dim:} 256
+\item \textbf{MLP Activation:} GELU
+\item \textbf{MLP Dropout:} 0.1
+\item \textbf{Complexity Coefficient:} 0.01
+\item \textbf{Inclusion Coefficient:} 0.5
+\item \textbf{Probability Constant:} 0.35
+\item \textbf{Constant Range:} (-3, 3)
+\item \textbf{Point Mutation Probability:} 0.1
+\item \textbf{Selector Update Frequency:} 3
+\item \textbf{Temperature:} 0.7
+\item \textbf{Critic Weight:} 0.6
+\item \textbf{Entropy Weight:} 0.02
+\item \textbf{Random Seed:} 56
+\end{itemize}
+\section*{Performance Metrics}
+\begin{itemize}
+\item \textbf{R²:} 0.5236
+\item \textbf{RMSE:} 49.2841
+\item \textbf{MAPE:} 33.11\%
+\item \textbf{SMAPE:} 27.87\%
+\item \textbf{Best Score (MSE + penalty):} 0.523640
+\end{itemize}
+\subsection*{Manual Decomposition}
+\begin{itemize}
+\item $t_{1} = \sin{\left(So - Sp \right)} - \tan{\left(So \right)} + 2.95045988880775$
+\item $t_{2} = - 2.30241770588936 \sqrt{So \left(So + 2.17934930772859\right)}$
+\item $t_{3} = \frac{\sin{\left(So - e^{So} \right)}}{\sqrt{So} \left(\cos{\left(So \right)} + 2.29158639935468\right)}$
+\item $t_{4} = \frac{So + t_{3} + 0.850943820367003}{- 0.302417705889358 So + t_{2}}$
+\item $t_{5} = \sqrt{So} + 81.5389723492468 So - 221.735860518726$
+\item $t_{6} = \left(So + 1.42977246698425\right) \left(So + \sqrt{So^{2}}\right)$
+\item $t_{7} = \left(2.29158639935468 - \sin{\left(Sp - \tan{\left(So \right)} \right)}\right) \tan{\left(So \right)}$
+\item $t_{8} = - \left(t_{6} - \sin{\left(t_{5} \right)}\right) \sin{\left(t_{7} \right)}$
+\item $t_{9} = - 145.296777529144 So - 144.296777529144 \sin{\left(So - Sp \right)} - \sin{\left(So + t_{8} \right)} - 231.656503236447$
+\item $t_{10} = So \left(So + 8.28994123113163\right) e^{\tan{\left(So \right)}}$
+\item $t_{11} = \sin{\left(t_{10} + \frac{t_{9}}{\tan{\left(So \right)}} - 2.14785486480264 \right)}$
+\item $t_{12} = \frac{1}{- t_{11} - e^{So} - 2.50397709334438}$
+\item $t_{13} = e^{- \sqrt{\tan{\left(So \right)}}}$
+\item $t_{14} = 0.0121154888598407 So - 0.0121154888598407 \sin{\left(So - Sp \right)} + 0.0242309777196814 \tan{\left(So \right)} - 0.0357462639142572$
+\item $t_{15} = So + So e^{- \sqrt[4]{So}} - \frac{0.35066149067984 t_{14}}{So^{2}}$
+\item $t_{16} = - \frac{t_{15}}{So^{\frac{3}{2}} \left(So + \tan{\left(1.85175311968606 So \right)}\right) \left(So + \cos{\left(So \right)} + 1.62586418867096\right)}$
+\item $t_{17} = - So + t_{12} \left(So + 2.29158639935468 t_{13} + t_{16}\right) + 1$
+\item $t_{18} = \frac{t_{17} \sin{\left(e^{\sqrt{So}} \right)}}{So^{2} \left(t_{4} + 1\right)}$
+\item $t_{19} = \cos{\left(\tan{\left(\tan{\left(\sin{\left(Sp \right)} + 2.29158639935468 \right)} \right)} \right)}$
+\item $t_{20} = e^{\cos{\left(t_{19} - \sin{\left(\tan{\left(So \right)} \right)} \right)}}$
+\item $t_{21} = e^{- \sqrt{\tan{\left(So \right)}}}$
+\item $t_{22} = - \sin{\left(So - Sp \right)} + 2 \tan{\left(So \right)} - 1.44511609985034$
+\item $t_{23} = e^{- So + \cos{\left(So t_{22} - 2.95045988880775 \right)}}$
+\item $t_{24} = 0.360564167842285 So + t_{23} - \tan{\left(So \right)} + 0.519711108510404$
+\item $t_{25} = - \sqrt{2.29158639935468 - \sin{\left(t_{24} \right)}}$
+\item $t_{26} = \sqrt{So} - So + \frac{So - 2.68643834794182}{So + 2.95045988880775}$
+\item $t_{27} = \left(So + 1.42977246698425\right) \sin{\left(So - Sp \right)} - \sin{\left(t_{26} \right)}$
+\item $t_{28} = - \left(2.29158639935468 - \sin{\left(Sp - \tan{\left(So \right)} \right)}\right) \tan{\left(So \right)}$
+\item $t_{29} = \sin{\left(So + t_{27} \sin{\left(Sp + t_{28} \right)} \right)}$
+\item $t_{30} = \sin{\left(So - Sp \right)} - \tan{\left(So \right)} + 2.95045988880775$
+\item $t_{31} = \tan{\left(\frac{So + 0.539521972603667}{\cos{\left(So \right)}} - 0.0121154888598407 \right)}$
+\item $t_{32} = - So - t_{29} - 82.5389723492468 t_{30} t_{31} + 2.95045988880775$
+\item $t_{33} = \frac{t_{32}}{\tan{\left(So \right)}} + \tan{\left(1.85175311968606 So \right)}$
+\item $t_{34} = - \frac{\left(2.29158639935468 - \sin{\left(Sp - \tan{\left(So \right)} \right)}\right) \sin{\left(e^{\sqrt{So}} \right)}}{So}$
+\item $t_{35} = - \frac{\tan{\left(So \right)}}{\sqrt{So} t_{33} \left(- So e^{t_{25}} + So\right) \tan{\left(t_{34} + 1.64486963126019 \right)}}$
+\item $t_{36} = \frac{So + 2.29158639935468 t_{21} + t_{35}}{So + 5.53866788123705}$
+\item $t_{37} = 2.29158639935468 \cos{\left(\cos{\left(\sin{\left(So \right)} \right)} \right)} + 5.25136822570735$
+\item $t_{38} = \sin{\left(So - Sp \right)} - \tan{\left(So \right)} + 2.95045988880775$
+\item $t_{39} = 1.31144590313974 So + t_{36} + 1 - \frac{t_{38}}{t_{37}}$
+\item $t_{40} = - e^{- So + \cos{\left(\sin{\left(So \right)} \right)}}$
+\item $t_{41} = 0.639435832157715 So + t_{40} + \tan{\left(So \right)} - 2.18144830604669$
+\item $t_{42} = - \sqrt{\sin{\left(t_{41} \right)} + 2.29158639935468}$
+\item $t_{43} = \sqrt{So} - So + \frac{So e^{t_{42}}}{t_{39}}$
+\item $t_{44} = - 2.30241770588936 \sqrt{So \left(So + 2.64966349166065\right)}$
+\item $t_{45} = \left(- 2.30241770588936 So + t_{44} - \sin{\left(t_{43} \right)}\right) \sin{\left(So - Sp \right)}$
+\item $t_{46} = So + t_{45} + \sin{\left(So - 2.7751054196474 \right)} + 71.478076023527 \sin{\left(So - Sp \right)} - 71.478076023527 \tan{\left(So \right)} + 210.893196236568$
+\item $t_{47} = So \tan{\left(t_{46} \right)} + e^{\frac{2.64832622262372}{So}}$
+\item $t_{48} = \frac{\left(So + 1.19204290868458\right) e^{\frac{t_{20}}{t_{18} + 1}} \sin{\left(t_{47} \right)}}{So}$
+\item $t_{49} = 82.5389723492468 t_{1} \tan{\left(So \right)} + t_{48} + \sin{\left(So - 1 \right)}$
+\item $e_{1} = t_{49}$
+\end{itemize}
+\subsection*{Reduced Expression}
+\end{document}

@@ -1,0 +1,93 @@
+\documentclass{article}
+\usepackage{amsmath}
+\usepackage{pdflscape}
+\usepackage{geometry}
+\usepackage{listings}
+\geometry{a4paper,margin=1.5cm}
+\begin{document}
+\section*{Hyperparameters}
+\begin{itemize}
+\item \textbf{Population Size:} 2000
+\item \textbf{Generations:} 300
+\item \textbf{Max Initial Depth:} 4
+\item \textbf{Max Depth:} 10
+\item \textbf{Crossover Rate:} 0.85
+\item \textbf{Mutation Rate:} 0.2
+\item \textbf{Tournament Size:} 5
+\item \textbf{Elitism:} 15
+\item \textbf{Use Learned Crossover:} True
+\item \textbf{Selector Learning Rate:} 5.0e-04
+\item \textbf{Use Transformer:} False
+\item \textbf{Transformer Heads:} 8
+\item \textbf{Transformer Layers:} 4
+\item \textbf{MLP Layers:} 15
+\item \textbf{MLP Hidden Dim:} 256
+\item \textbf{MLP Activation:} GELU
+\item \textbf{MLP Dropout:} 0.1
+\item \textbf{Complexity Coefficient:} 1.0e-05
+\item \textbf{Inclusion Coefficient:} 0.5
+\item \textbf{Probability Constant:} 0.35
+\item \textbf{Constant Range:} (-3, 3)
+\item \textbf{Point Mutation Probability:} 0.1
+\item \textbf{Selector Update Frequency:} 3
+\item \textbf{Temperature:} 0.7
+\item \textbf{Critic Weight:} 0.6
+\item \textbf{Entropy Weight:} 0.02
+\item \textbf{Random Seed:} 56
+\end{itemize}
+\section*{Performance Metrics}
+\begin{itemize}
+\item \textbf{R²:} 0.8782
+\item \textbf{RMSE:} 0.2901
+\item \textbf{MAPE:} 1.42\%
+\item \textbf{SMAPE:} 1.43\%
+\item \textbf{Best Score (MSE + penalty):} 0.878189
+\end{itemize}
+\subsection*{Manual Decomposition}
+\begin{itemize}
+\item $t_{1} = \sin{\left(\sin{\left(Te - \frac{Te - 0.932673661417481}{Pr} \right)} \right)}$
+\item $t_{2} = \sin{\left(Te + \frac{\tan{\left(Pr - Te \right)}}{Pr} \right)}$
+\item $t_{3} = \left(-8.98781653545383 - \frac{2.6796023195273 t_{1}}{So}\right) \sin{\left(t_{2} \right)}$
+\item $t_{4} = - \cos{\left(\tan{\left(\cos{\left(Te - 2.8236818554625 \right)} \right)} \right)}$
+\item $t_{5} = \sin{\left(\sin{\left(Te - \frac{Te + t_{4}}{Pr} \right)} \right)}$
+\item $t_{6} = \frac{1}{-8.98781653545383 + \frac{t_{5} \left(Te - 2.32048195430829\right)}{So}}$
+\item $t_{7} = \cos{\left(Te - 2.32048195430829 \right)} + \frac{2.7599397743342}{\cos{\left(0.65413649449199 t_{6} + 5.67205477072444 \right)}}$
+\item $t_{8} = \tan{\left(\frac{\sin{\left(0.133849112924908 Pr + 0.0049052392678502 \right)}}{So} \right)}$
+\item $t_{9} = \frac{1}{- t_{8} \sin{\left(t_{7} \right)} - 0.681408703494794}$
+\item $t_{10} = \sin{\left(\cos{\left(Te - 2.32048195430829 \right)} + \frac{2.7599397743342}{Pr} \right)}$
+\item $t_{11} = 0.366612788118867 \cos{\left(\tan{\left(Pr - 0.179924245921533 \right)} \right)} + 5.93473124283401$
+\item $t_{12} = - \sin{\left(t_{10} - \frac{1.32192923204513}{Pr} \right)} \tan{\left(\frac{\sin{\left(t_{11} \right)}}{So} \right)}$
+\item $t_{13} = - \frac{1}{\left(t_{12} - 0.681408703494794\right) \left(t_{9} + 16.1880093525537\right)}$
+\item $t_{14} = t_{13} + e^{\cos{\left(Te + 1.36281740698959 \right)}} - \frac{Te + 0.681408703494794}{Pr}$
+\item $t_{15} = \sin{\left(\frac{0.366612788118867 t_{14}}{t_{3} - 8.98781653545383} + 5.67205477072444 \right)}$
+\item $t_{16} = 0.366612788118867 Pr + 0.366612788118867 \cos{\left(\tan{\left(Pr - 0.179924245921533 \right)} \right)} - 0.0659625294474778$
+\item $t_{17} = - Pr + \tan{\left(\frac{\sin{\left(t_{16} \right)}}{So} \right)} + \tan{\left(Pr + 0.98197187199823 \right)}$
+\item $t_{18} = \cos{\left(Te - 2.32048195430829 \right)} + \frac{0.358672800231367 \sin{\left(\sin{\left(So \right)} \right)}}{Pr}$
+\item $t_{19} = 0.366612788118867 \cos{\left(\tan{\left(Pr - 0.179924245921533 \right)} \right)} + 5.93473124283401$
+\item $t_{20} = - \sin{\left(t_{18} \right)} \tan{\left(\frac{\sin{\left(t_{19} \right)}}{So} \right)}$
+\item $t_{21} = - \cos{\left(\tan{\left(\cos{\left(Te - 2.32048195430829 \right)} \right)} \right)}$
+\item $t_{22} = \sin{\left(\cos{\left(Te - 2.32048195430829 \right)} + \frac{2.7599397743342}{Pr} \right)}$
+\item $t_{23} = - \frac{15.6739295013237 \sin{\left(0.376431160840897 Pr \right)}}{Pr}$
+\item $t_{24} = \frac{0.366612788118867 \left(\frac{1.56052541265706 Pr}{t_{23} - 21.9678342990584} - 2.6796023195273\right)}{- Pr - 0.307368960378304}$
+\item $t_{25} = - t_{22} \tan{\left(\frac{\sin{\left(t_{24} + 5.67205477072444 \right)}}{So} \right)}$
+\item $t_{26} = \cos{\left(Te - 2.32048195430829 \right)} + \frac{2.7599397743342}{\cos{\left(Te - 2.32048195430829 \right)}}$
+\item $t_{27} = \sin{\left(5.67205477072444 - \frac{0.0659625294474778}{\tan{\left(Pr + 0.906041733350064 \right)}} \right)}$
+\item $t_{28} = - \sin{\left(t_{26} \right)} \tan{\left(\frac{t_{27}}{So} \right)}$
+\item $t_{29} = 0.366612788118867 \cos{\left(\tan{\left(Pr - 0.179924245921533 \right)} \right)} + 5.93473124283401$
+\item $t_{30} = - \sin{\left(\cos{\left(Te - 2.32048195430829 \right)} \right)} \tan{\left(\frac{\sin{\left(t_{29} \right)}}{So} \right)}$
+\item $t_{31} = \sin{\left(\cos{\left(Te - 2.32048195430829 \right)} + \frac{2.7599397743342}{Pr} \right)}$
+\item $t_{32} = \frac{1}{- Pr + \tan{\left(Pr - Te \right)} - 0.48926022798077}$
+\item $t_{33} = \frac{2.6796023195273 \sin{\left(5238332.03204997 - \frac{0.861332949416326}{Pr + 0.681408703494794} \right)}}{Pr}$
+\item $t_{34} = \frac{1.56052541265706 Pr}{t_{33} - 13.3172842630643 + \frac{2.6796023195273}{Pr}}$
+\item $t_{35} = \sin{\left(0.366612788118867 t_{32} \left(t_{34} - 2.6796023195273\right) + 5.67205477072444 \right)}$
+\item $t_{36} = - t_{31} \tan{\left(\frac{t_{35}}{So} \right)} - 0.681408703494794$
+\item $t_{37} = 13.4473622683011 - \frac{1}{t_{30} - 0.681408703494794} - \frac{- Pr + \frac{Pr}{t_{36}}}{Te}$
+\item $t_{38} = - \frac{2.8236818554625 So \left(- Pr + \tan{\left(Pr + 0.98197187199823 \right)} - 2.89929305296405\right)}{t_{37} \sin{\left(\sin{\left(So - Te \right)} \right)}}$
+\item $t_{39} = t_{38} - \frac{1}{t_{28} - 0.681408703494794} - \frac{1}{t_{25} - 0.681408703494794} + \frac{Te - \cos{\left(Te + 0.681408703494794 \right)}}{Pr}$
+\item $t_{40} = - \frac{t_{39}}{t_{21} - 16.0080851066322} + 13.4473622683011 - \frac{1}{t_{20} - 0.681408703494794}$
+\item $t_{41} = \frac{\sin{\left(5.67205477072444 + \frac{0.366612788118867 t_{40}}{t_{17}} \right)}}{So}$
+\item $t_{42} = \cos{\left(\tan{\left(t_{41} \right)} \right)} + \cos{\left(\tan{\left(\frac{t_{15}}{So} \right)} \right)} + 16.2494069157883$
+\item $e_{1} = t_{42}$
+\end{itemize}
+\subsection*{Reduced Expression}
+\end{document}

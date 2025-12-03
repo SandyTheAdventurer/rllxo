@@ -1,0 +1,57 @@
+\documentclass{article}
+\usepackage{amsmath}
+\usepackage{pdflscape}
+\usepackage{geometry}
+\usepackage{listings}
+\geometry{a4paper,margin=1.5cm}
+\begin{document}
+\section*{Hyperparameters}
+\begin{itemize}
+\item \textbf{Population Size:} 2000
+\item \textbf{Generations:} 200
+\item \textbf{Max Initial Depth:} 4
+\item \textbf{Max Depth:} 10
+\item \textbf{Crossover Rate:} 0.85
+\item \textbf{Mutation Rate:} 0.2
+\item \textbf{Tournament Size:} 5
+\item \textbf{Elitism:} 15
+\item \textbf{Use Learned Crossover:} True
+\item \textbf{Selector Learning Rate:} 5.0e-04
+\item \textbf{Use Transformer:} False
+\item \textbf{Transformer Heads:} 8
+\item \textbf{Transformer Layers:} 4
+\item \textbf{MLP Layers:} 15
+\item \textbf{MLP Hidden Dim:} 256
+\item \textbf{MLP Activation:} GELU
+\item \textbf{MLP Dropout:} 0.1
+\item \textbf{Complexity Coefficient:} 1.0e-05
+\item \textbf{Inclusion Coefficient:} 0.5
+\item \textbf{Probability Constant:} 0.35
+\item \textbf{Constant Range:} (-3, 3)
+\item \textbf{Point Mutation Probability:} 0.1
+\item \textbf{Selector Update Frequency:} 3
+\item \textbf{Temperature:} 0.7
+\item \textbf{Critic Weight:} 0.6
+\item \textbf{Entropy Weight:} 0.02
+\item \textbf{Random Seed:} 56
+\end{itemize}
+\section*{Performance Metrics}
+\begin{itemize}
+\item \textbf{R²:} 0.9134
+\item \textbf{RMSE:} 0.0251
+\item \textbf{MAPE:} 2.92\%
+\item \textbf{SMAPE:} 2.92\%
+\item \textbf{Best Score (MSE + penalty):} 0.913382
+\end{itemize}
+\begin{landscape}
+\subsection*{Common Subexpressions}
+\vspace{1em}
+\newpage
+\end{landscape}
+\subsection*{Reduced Expression}
+\begin{landscape}
+\begin{dmath*}
+e_{1} = \frac{Sp}{Te} - \frac{e^{- \sin{\left(Sp - e^{\frac{Sp}{Pr}} \right)}} \sin{\left(Te \right)}}{Sp}
+\end{dmath*}
+\end{landscape}
+\end{document}

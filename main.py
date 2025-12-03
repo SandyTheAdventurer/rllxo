@@ -7,7 +7,7 @@ import operator
 import time
 from typing import Callable, Dict, List, Mapping, Tuple
 import warnings
-
+import multiprocessing as mp
 import numpy as np
 import sympy as sp
 import torch
@@ -72,11 +72,16 @@ DEFAULT_SYMPY_UNARY = {
     'log': sp.log,
 }
 
+def _sympy_safe_div(a, b):
+    if b == 0:
+        return a / sp.Float(1e-12)
+    return a / b
+
 SYMPY_BINARY = {
     'add': lambda a, b: a + b,
     'sub': lambda a, b: a - b,
     'mul': lambda a, b: a * b,
-    'div': lambda a, b: a / (b + sp.Float(1e-12)),
+    'div': _sympy_safe_div,
 }
 
 UNARY_FUNCS = dict(DEFAULT_UNARY_FUNCS)
@@ -339,7 +344,8 @@ def fitness(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray, complexi
         mse = float(np.mean((y - y_pred)**2))
     except Exception:
         return 1e6 + ind.size()
-    missing_vars = set(inputs.keys()) - gather_used_var_names(ind)
+    inert_vars = detect_inert_variables(ind, inputs, y_pred)
+    missing_vars = (set(inputs.keys()) - gather_used_var_names(ind)) | inert_vars
     inclusion_penalty = inclusion_coef * len(missing_vars)
     return mse + complexity_coef * ind.size() + inclusion_penalty
 
@@ -734,6 +740,8 @@ def run_ga(
     prob_const=0.3,
     const_range=(-5, 5),
     point_mutation_prob=0.05,
+    simplify_new_genomes=False,
+    simplify_timeout=0.2,
     selector_update_freq=5,
     temperature=0.5,
     critic_weight=0.5,
@@ -784,6 +792,8 @@ def run_ga(
         )
         for _ in range(pop_size)
     ]
+    if simplify_new_genomes:
+        pop = [simplify_node_with_timeout(ind, simplify_timeout) for ind in pop]
     
     # Initialize subtree selector
     if use_learned_crossover:
@@ -902,7 +912,9 @@ def run_ga(
         # elitism
         sorted_idx = sorted(range(len(pop)), key=lambda i: scores[i])
         for i in range(elitism):
-            next_pop.append(pop[sorted_idx[i]].clone())
+            elite = pop[sorted_idx[i]].clone()
+            elite = simplify_node_with_timeout(elite, simplify_timeout)
+            next_pop.append(elite)
         # produce rest
         while len(next_pop) < pop_size:
             if random.random() < crossover_rate:
@@ -922,6 +934,9 @@ def run_ga(
                     child1 = subtree_mutation_custom(child1, max_depth, prob_const, const_range)
                 if random.random() < mutation_rate:
                     child2 = subtree_mutation_custom(child2, max_depth, prob_const, const_range)
+                if simplify_new_genomes:
+                    child1 = simplify_node_with_timeout(child1, simplify_timeout)
+                    child2 = simplify_node_with_timeout(child2, simplify_timeout)
                 next_pop.append(child1)
                 if len(next_pop) < pop_size:
                     next_pop.append(child2)
@@ -935,6 +950,8 @@ def run_ga(
                     child = subtree_mutation_custom(child, max_depth, prob_const, const_range)
                 # small point mutations
                 child = point_mutation(child, prob_change=point_mutation_prob)
+                if simplify_new_genomes:
+                    child = simplify_node_with_timeout(child, simplify_timeout)
                 next_pop.append(child)
         pop = next_pop
 
@@ -1002,7 +1019,8 @@ def fitness_custom(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray,
         mse = float(np.mean((y - y_pred)**2))
     except Exception:
         return 1e6 + ind.size()
-    missing_vars = set(inputs.keys()) - gather_used_var_names(ind)
+    inert_vars = detect_inert_variables(ind, inputs, y_pred)
+    missing_vars = (set(inputs.keys()) - gather_used_var_names(ind)) | inert_vars
     inclusion_penalty = inclusion_coef * len(missing_vars)
     return mse + complexity_coef * ind.size() + inclusion_penalty
 
@@ -1356,5 +1374,102 @@ def prepare_inputs(x, var_names=None) -> Tuple[Dict[str, np.ndarray], List[str]]
         raise ValueError("All variable arrays must share the same length.")
     return data, list(var_names)
 
-if __name__ == "__main__":
-    example()
+def detect_inert_variables(ind: Node, inputs: Mapping[str, np.ndarray], base_pred: np.ndarray,
+                           atol=1e-5, rtol=1e-4) -> set[str]:
+    inert = set()
+    for name in inputs:
+        perturbed = {k: v.copy() for k, v in inputs.items()}
+        perturbed[name] = np.roll(perturbed[name], 1)  # cheap permutation
+        try:
+            alt_pred = ind.evaluate(perturbed)
+        except Exception:
+            inert.add(name)
+            continue
+        if np.allclose(base_pred, alt_pred, atol=atol, rtol=rtol):
+            inert.add(name)
+    return inert
+
+
+def _timed_simplify_worker(expr, queue):
+    try:
+        queue.put(sp.simplify(expr))
+    except Exception as exc:
+        queue.put(exc)
+
+
+def timed_sympy_simplify(expr: sp.Expr, timeout: float | None):
+    if timeout is None or timeout <= 0:
+        return None
+    ctx = mp.get_context("spawn")
+    queue = ctx.Queue()
+    process = ctx.Process(target=_timed_simplify_worker, args=(expr, queue))
+    process.daemon = True
+    process.start()
+    process.join(timeout)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+        return None
+    if queue.empty():
+        return None
+    result = queue.get()
+    if isinstance(result, Exception):
+        return None
+    return result
+
+
+def sympy_to_node(expr: sp.Expr) -> Node:
+    if expr.is_Number:
+        return Const(float(expr))
+    if expr.is_Symbol:
+        name = str(expr)
+        if name not in VAR_SYMBOLS:
+            raise ValueError(f"Unknown symbol '{name}' in simplified expression.")
+        return Var(name)
+    sympy_func_to_name = {func: name for name, func in SYMPY_UNARY.items()}
+    if expr.func in sympy_func_to_name:
+        if len(expr.args) != 1:
+            raise ValueError("Unsupported arity for unary function.")
+        return Unary(sympy_func_to_name[expr.func], sympy_to_node(expr.args[0]))
+    if expr.func == sp.Add:
+        args = list(expr.args)
+        node = sympy_to_node(args[0])
+        for arg in args[1:]:
+            node = Binary('add', node, sympy_to_node(arg))
+        return node
+    if expr.func == sp.Mul:
+        numerators, denominators = [], []
+        for arg in expr.args:
+            if isinstance(arg, sp.Pow) and arg.exp == -1:
+                denominators.append(arg.base)
+            else:
+                numerators.append(arg)
+        node = sympy_to_node(numerators[0]) if numerators else Const(1.0)
+        for arg in numerators[1:]:
+            node = Binary('mul', node, sympy_to_node(arg))
+        for arg in denominators:
+            node = Binary('div', node, sympy_to_node(arg))
+        return node
+    if isinstance(expr, sp.Pow):
+        if expr.exp == -1:
+            return Binary('div', Const(1.0), sympy_to_node(expr.base))
+        if expr.exp == 2:
+            base_node = sympy_to_node(expr.base)
+            return Binary('mul', base_node.clone(), base_node.clone())
+        raise ValueError("Unsupported exponent encountered during simplification.")
+    raise ValueError("Unsupported sympy construct during simplification.")
+
+
+def simplify_node_with_timeout(node: Node, timeout: float | None) -> Node:
+    if timeout is None or timeout <= 0:
+        return node
+    try:
+        simplified_expr = timed_sympy_simplify(node.to_sympy(), timeout)
+    except Exception:
+        return node
+    if simplified_expr is None:
+        return node
+    try:
+        return sympy_to_node(simplified_expr)
+    except ValueError:
+        return node

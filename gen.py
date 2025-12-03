@@ -46,7 +46,7 @@ FUNCTION_SPECS = [
         "id": 4,
         "func": f4,
         "expr": "x**6 + x**5 + x**4 + x**3 + x**2 + x",
-        "variables": [{"name": "x", "sampler": uniform_sampler(-5.0, 5.0)}],
+        "variables": [{"name": "x", "sampler": uniform_sampler(-2.0, 2.0)}],
     },
     {
         "id": 5,
@@ -95,8 +95,8 @@ FUNCTION_SPECS = [
         "func": f11,
         "expr": "x**y",
         "variables": [
-            {"name": "x", "sampler": uniform_sampler(0.1, 5.0)},
-            {"name": "y", "sampler": uniform_sampler(0.1, 5.0)},
+            {"name": "x", "sampler": uniform_sampler(0.1, 2.0)},
+            {"name": "y", "sampler": uniform_sampler(0.1, 2.0)},
         ],
     },
     {
@@ -104,8 +104,8 @@ FUNCTION_SPECS = [
         "func": f12,
         "expr": "x**4 - x**3 + (y**2)/2 - y",
         "variables": [
-            {"name": "x", "sampler": uniform_sampler(-5.0, 5.0)},
-            {"name": "y", "sampler": uniform_sampler(-5.0, 5.0)},
+            {"name": "x", "sampler": uniform_sampler(-2.0, 2.0)},
+            {"name": "y", "sampler": uniform_sampler(-2.0, 2.0)},
         ],
     },
 ]
@@ -127,7 +127,7 @@ def generate_dataset(size: int, seed: int = 42, out_dir: Path | None = None):
 
         targets = spec["func"](*inputs)
         df = pd.DataFrame(data)
-        df["y"] = targets
+        df["target"] = targets
 
         csv_path = base_dir / f"{spec['id']}.csv"
         df.to_csv(csv_path, index=False)
