@@ -8,7 +8,7 @@
 \section*{Hyperparameters}
 \begin{itemize}
 \item \textbf{Population Size:} 2000
-\item \textbf{Generations:} 300
+\item \textbf{Generations:} 200
 \item \textbf{Max Initial Depth:} 4
 \item \textbf{Max Depth:} 10
 \item \textbf{Crossover Rate:} 0.85
@@ -17,48 +17,35 @@
 \item \textbf{Elitism:} 15
 \item \textbf{Use Learned Crossover:} True
 \item \textbf{Selector Learning Rate:} 5.0e-04
-\item \textbf{Use Transformer:} False
-\item \textbf{Transformer Heads:} 8
-\item \textbf{Transformer Layers:} 4
 \item \textbf{MLP Layers:} 15
 \item \textbf{MLP Hidden Dim:} 256
 \item \textbf{MLP Activation:} GELU
 \item \textbf{MLP Dropout:} 0.1
-\item \textbf{Complexity Coefficient:} 1.0e-04
+\item \textbf{Complexity Coefficient:} 1.0e-03
 \item \textbf{Inclusion Coefficient:} 0.5
 \item \textbf{Probability Constant:} 0.35
 \item \textbf{Constant Range:} (-3, 3)
+\item \textbf{Optimize Constants:} True
 \item \textbf{Point Mutation Probability:} 0.1
 \item \textbf{Selector Update Frequency:} 3
 \item \textbf{Temperature:} 0.7
 \item \textbf{Critic Weight:} 0.6
 \item \textbf{Entropy Weight:} 0.02
-\item \textbf{Random Seed:} 76
+\item \textbf{Random Seed:} 56
 \end{itemize}
 \section*{Performance Metrics}
 \begin{itemize}
-\item \textbf{R²:} 0.9000
-\item \textbf{RMSE:} 0.4660
-\item \textbf{MAPE:} 1.24\%
-\item \textbf{SMAPE:} 1.24\%
-\item \textbf{Best Score (MSE + penalty):} 0.900000
+\item \textbf{R²:} 0.8871
+\item \textbf{RMSE:} 0.4951
+\item \textbf{MAPE:} 1.34\%
+\item \textbf{SMAPE:} 1.34\%
+\item \textbf{Best Score (MSE + penalty):} 0.887102
 \end{itemize}
 \subsection*{Manual Decomposition}
 \begin{itemize}
-\item $t_{1} = \tan{\left(Pr + \sin{\left(Pr + 1.67886867215433 \right)} - 1.13269175239944 \right)}$
-\item $t_{2} = - So + \cos{\left(Sp \right)} + \cos{\left(\cos{\left(So \right)} \right)} - \cos{\left(\cos{\left(t_{1} \right)} \right)} + \cos{\left(\cos{\left(\cos{\left(So \right)} \right)} \right)} + \tan{\left(\cos{\left(Sp - 1.85642928237521 \right)} \right)} - 2.19628147929118$
-\item $t_{3} = Pr + \tan{\left(\tan{\left(\cos{\left(Sp + 0.954622888734906 \right)} \right)} \right)}$
-\item $t_{4} = 1.44858193637532 \sqrt[8]{t_{3}} e^{So}$
-\item $t_{5} = - 1.0 \cos{\left(\frac{19.4930676033309}{So + e^{So}} \right)}$
-\item $t_{6} = \cos{\left(\frac{19.4930676033309}{\sqrt{So} + So} \right)}$
-\item $t_{7} = - \cos{\left(\frac{19.4930676033309}{So + e^{So}} \right)}$
-\item $t_{8} = 0.816095859636265 \sin{\left(Sp \right)} - 0.577916557890968 \cos{\left(Sp \right)}$
-\item $t_{9} = 1.0 Sp + \frac{0.186596906090963}{\tan{\left(\tan{\left(\cos{\left(t_{8} \right)} \right)} \right)}}$
-\item $t_{10} = \cos{\left(1.0 \tan{\left(\cos{\left(t_{9} \right)} \right)} + 0.804780250915023 \right)}$
-\item $t_{11} = 1.13696819133808 Pr + 2.13696819133808 \cos{\left(\cos{\left(Pr \right)} \right)} - 2.13696819133808 \cos{\left(\cos{\left(So \right)} \right)} - 44.3272132954504$
-\item $t_{12} = t_{10} - t_{6} + t_{7} + 24.3599096597597 + e^{- \frac{\cos{\left(Pr \right)}}{t_{11}}}$
-\item $t_{13} = t_{5} + 1.0 e^{\frac{\cos{\left(t_{4} \right)}}{t_{2}}} - 1.0 \cos{\left(t_{12} \right)} + 1.0 \cos{\left(\cos{\left(Sp \right)} \right)} + 24.3599096597597$
-\item $e_{1} = t_{13}$
+\item $t_{1} = \sqrt{\sqrt{Pr} + 83.531031390811}$
+\item $t_{2} = - 16.7676966278834 So - \sin{\left(t_{1} + \frac{6.9181495639626}{So} \right)} + \cos{\left(Sp \right)} + 37.4591171825024$
+\item $e_{1} = t_{2}$
 \end{itemize}
 \subsection*{Reduced Expression}
 \end{document}

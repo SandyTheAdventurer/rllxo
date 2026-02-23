@@ -1,11 +1,10 @@
 # Genetic algorithm for symbolic regression (simple, self-contained)
 
 import random
-import math
 import copy
 import operator
 import time
-from typing import Callable, Dict, List, Mapping, Tuple
+from typing import Dict, List, Mapping, Tuple
 import warnings
 import multiprocessing as mp
 import numpy as np
@@ -34,14 +33,23 @@ set_global_seed(DEFAULT_SEED)
 
 # Set device for PyTorch operations
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Using device: {DEVICE}")
-if torch.cuda.is_available():
-    print(f"GPU: {torch.cuda.get_device_name(0)}")
-    print(f"CUDA Version: {torch.version.cuda}")
+
+
+def _print_device_info():
+    print(f"Using device: {DEVICE}")
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA Version: {torch.version.cuda}")
 
 # Protected operators to avoid NaNs/Infs
 def pdiv(a, b):
     return a / (b + 1e-6)
+
+
+def ppow(a, b):
+    # Avoid hard crashes on invalid domains; NaNs are handled by fitness.
+    with np.errstate(all="ignore"):
+        return np.power(a, b)
 
 def plog(a):
     return np.log(np.abs(a) + 1e-10)
@@ -57,7 +65,7 @@ DEFAULT_UNARY_FUNCS = {
     'log': plog,
 }
 
-BINARY_FUNCS = {
+BASE_BINARY_FUNCS = {
     'add': operator.add,
     'sub': operator.sub,
     'mul': operator.mul,
@@ -77,12 +85,15 @@ def _sympy_safe_div(a, b):
         return a / sp.Float(1e-12)
     return a / b
 
-SYMPY_BINARY = {
+BASE_SYMPY_BINARY = {
     'add': lambda a, b: a + b,
     'sub': lambda a, b: a - b,
     'mul': lambda a, b: a * b,
     'div': _sympy_safe_div,
 }
+
+BINARY_FUNCS = dict(BASE_BINARY_FUNCS)
+SYMPY_BINARY = dict(BASE_SYMPY_BINARY)
 
 UNARY_FUNCS = dict(DEFAULT_UNARY_FUNCS)
 SYMPY_UNARY = {name: DEFAULT_SYMPY_UNARY[name] for name in UNARY_FUNCS}
@@ -221,7 +232,7 @@ class Binary(Node):
         return 1 + max(self.left.depth(), self.right.depth())
 
     def to_string(self):
-        op = {'add': '+', 'sub': '-', 'mul': '*', 'div': '/'}[self.func_name]
+        op = {'add': '+', 'sub': '-', 'mul': '*', 'div': '/', 'pow': '**'}[self.func_name]
         return f"({self.left.to_string()} {op} {self.right.to_string()})"
 
     def all_nodes(self):
@@ -230,27 +241,6 @@ class Binary(Node):
     def to_sympy(self):
         f = SYMPY_BINARY[self.func_name]
         return f(self.left.to_sympy(), self.right.to_sympy())
-
-
-# Random tree generation
-def random_tree(max_depth: int, prob_const=0.3) -> Node:
-    if max_depth == 0:
-        if random.random() < prob_const:
-            return Const(random.uniform(-5, 5))
-        else:
-            return Var()
-    else:
-        r = random.random()
-        if r < 0.2:
-            return Const(random.uniform(-5, 5))
-        elif r < 0.4:
-            return Var()
-        elif r < 0.7:
-            func = random.choice(ALL_UNARY)
-            return Unary(func, random_tree(max_depth - 1, prob_const))
-        else:
-            func = random.choice(ALL_BINARY)
-            return Binary(func, random_tree(max_depth - 1, prob_const), random_tree(max_depth - 1, prob_const))
 
 
 # Helpers to pick random node and replace subtree
@@ -304,19 +294,6 @@ def subtree_crossover(a: Node, b: Node) -> Tuple[Node, Node]:
     return new_a, new_b
 
 
-# Mutation: subtree mutation or point mutation
-def subtree_mutation(ind: Node, max_depth: int) -> Node:
-    ind_clone = ind.clone()
-    nodes = collect_nodes_with_parents(ind_clone)
-    node, parent, attr = random.choice(nodes)
-    new_sub = random_tree(max_depth=random.randint(0, max_depth))
-    if parent is None:
-        return new_sub
-    else:
-        replace_child(parent, attr, new_sub)
-        return ind_clone
-
-
 def point_mutation(ind: Node, prob_change=0.1) -> Node:
     ind_clone = ind.clone()
     for node, parent, attr in collect_nodes_with_parents(ind_clone):
@@ -335,21 +312,6 @@ def point_mutation(ind: Node, prob_change=0.1) -> Node:
     return ind_clone
 
 
-# Fitness: mean squared error + complexity penalty
-def fitness(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray, complexity_coef=1e-3, inclusion_coef=1.0) -> float:
-    try:
-        y_pred = ind.evaluate(inputs)
-        if np.any(np.isinf(y_pred)) or np.any(np.isnan(y_pred)):
-            return 1e6 + ind.size()
-        mse = float(np.mean((y - y_pred)**2))
-    except Exception:
-        return 1e6 + ind.size()
-    inert_vars = detect_inert_variables(ind, inputs, y_pred)
-    missing_vars = (set(inputs.keys()) - gather_used_var_names(ind)) | inert_vars
-    inclusion_penalty = inclusion_coef * len(missing_vars)
-    return mse + complexity_coef * ind.size() + inclusion_penalty
-
-
 # Selection: tournament
 def tournament_select(pop: List[Node], scores: List[float], k=3, timeout=10.0) -> Node:
     if not pop:
@@ -360,6 +322,102 @@ def tournament_select(pop: List[Node], scores: List[float], k=3, timeout=10.0) -
         try:
             selected_idx = random.sample(range(len(pop)), sample_size)
             best = min(selected_idx, key=lambda i: scores[i])
+            return pop[best].clone()
+        except Exception:
+            if time.perf_counter() >= deadline:
+                return random.choice(pop).clone()
+
+
+def pareto_objectives(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray,
+                      inclusion_coef=1.0) -> Tuple[float, float]:
+    """Return (error_with_inclusion, complexity) objectives for Pareto sorting."""
+    try:
+        y_pred = ind.evaluate(inputs)
+        if np.any(np.isinf(y_pred)) or np.any(np.isnan(y_pred)):
+            return 1e6 + ind.size(), float(ind.size())
+        mse = float(np.mean((y - y_pred) ** 2))
+    except Exception:
+        return 1e6 + ind.size(), float(ind.size())
+    inert_vars = detect_inert_variables(ind, inputs, y_pred)
+    missing_vars = (set(inputs.keys()) - gather_used_var_names(ind)) | inert_vars
+    inclusion_penalty = inclusion_coef * len(missing_vars)
+    return mse + inclusion_penalty, float(ind.size())
+
+
+def _pareto_dominates(a: Tuple[float, float], b: Tuple[float, float]) -> bool:
+    return (a[0] <= b[0] and a[1] <= b[1]) and (a[0] < b[0] or a[1] < b[1])
+
+
+def pareto_rank_and_crowding(objectives: List[Tuple[float, float]]):
+    """Compute Pareto rank and crowding distance (NSGA-II style)."""
+    n = len(objectives)
+    if n == 0:
+        return [], []
+    domination_sets = [set() for _ in range(n)]
+    domination_counts = [0] * n
+    fronts = []
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _pareto_dominates(objectives[i], objectives[j]):
+                domination_sets[i].add(j)
+                domination_counts[j] += 1
+            elif _pareto_dominates(objectives[j], objectives[i]):
+                domination_sets[j].add(i)
+                domination_counts[i] += 1
+
+    current_front = [i for i in range(n) if domination_counts[i] == 0]
+    rank = [0] * n
+    front_rank = 0
+    while current_front:
+        fronts.append(current_front)
+        for idx in current_front:
+            rank[idx] = front_rank
+            for dominated in domination_sets[idx]:
+                domination_counts[dominated] -= 1
+        next_front = []
+        for idx in current_front:
+            for dominated in domination_sets[idx]:
+                if domination_counts[dominated] == 0:
+                    next_front.append(dominated)
+        # Deduplicate next front
+        current_front = list(dict.fromkeys(next_front))
+        front_rank += 1
+
+    crowding = [0.0] * n
+    for front in fronts:
+        if len(front) <= 2:
+            for idx in front:
+                crowding[idx] = float("inf")
+            continue
+        for obj_idx in range(2):
+            sorted_front = sorted(front, key=lambda i: objectives[i][obj_idx])
+            min_val = objectives[sorted_front[0]][obj_idx]
+            max_val = objectives[sorted_front[-1]][obj_idx]
+            crowding[sorted_front[0]] = float("inf")
+            crowding[sorted_front[-1]] = float("inf")
+            if max_val == min_val:
+                continue
+            for i in range(1, len(sorted_front) - 1):
+                prev_val = objectives[sorted_front[i - 1]][obj_idx]
+                next_val = objectives[sorted_front[i + 1]][obj_idx]
+                crowding[sorted_front[i]] += (next_val - prev_val) / (max_val - min_val)
+    return rank, crowding
+
+
+def tournament_select_pareto(pop: List[Node], ranks: List[int], crowding: List[float], scores: List[float],
+                             k=3, timeout=10.0) -> Node:
+    if not pop:
+        raise ValueError("Population must contain at least one individual.")
+    deadline = time.perf_counter() + timeout
+    sample_size = min(k, len(pop))
+    while True:
+        try:
+            selected_idx = random.sample(range(len(pop)), sample_size)
+            best = min(
+                selected_idx,
+                key=lambda i: (ranks[i], -crowding[i], scores[i])
+            )
             return pop[best].clone()
         except Exception:
             if time.perf_counter() >= deadline:
@@ -545,169 +603,7 @@ def collect_nodes_with_features(node: Node, parent=None, attr_name=None, depth=0
 subtree_selector = None
 selector_optimizer = None
 crossover_history = []
-
-def learned_subtree_crossover(a: Node, b: Node, use_learned=True) -> Tuple[Node, Node]:
-    """Crossover using learned subtree selection (or random if use_learned=False)."""
-    global subtree_selector
-    
-    a_clone = a.clone()
-    b_clone = b.clone()
-    a_nodes = collect_nodes_with_features(a_clone)
-    b_nodes = collect_nodes_with_features(b_clone)
-    
-    if use_learned and subtree_selector is not None:
-        # Use neural network to select crossover points
-        with torch.no_grad():
-            a_features = torch.stack([feat for _, _, _, feat in a_nodes])
-            b_features = torch.stack([feat for _, _, _, feat in b_nodes])
-            
-            # Get action logits and values from A2C
-            a_scores, a_values = subtree_selector(a_features, return_value=True)
-            b_scores, b_values = subtree_selector(b_features, return_value=True)
-            
-            # Clip scores to prevent overflow in softmax
-            a_scores = torch.clamp(a_scores, -10, 10)
-            b_scores = torch.clamp(b_scores, -10, 10)
-            
-            # Sample from softmax distribution (exploration)
-            a_probs = torch.softmax(a_scores / 0.5, dim=0)  # Temperature = 0.5
-            b_probs = torch.softmax(b_scores / 0.5, dim=0)
-            
-            # Additional safety check
-            if torch.isnan(a_probs).any() or torch.isinf(a_probs).any() or (a_probs < 0).any():
-                a_idx = random.randint(0, len(a_nodes) - 1)
-            else:
-                a_idx = torch.multinomial(a_probs, 1).item()
-            
-            if torch.isnan(b_probs).any() or torch.isinf(b_probs).any() or (b_probs < 0).any():
-                b_idx = random.randint(0, len(b_nodes) - 1)
-            else:
-                b_idx = torch.multinomial(b_probs, 1).item()
-    else:
-        # Random selection (baseline)
-        a_idx = random.randint(0, len(a_nodes) - 1)
-        b_idx = random.randint(0, len(b_nodes) - 1)
-    
-    node_a, parent_a, attr_a, feat_a = a_nodes[a_idx]
-    node_b, parent_b, attr_b, feat_b = b_nodes[b_idx]
-    
-    # Swap subtrees
-    if parent_a is None:
-        new_a = node_b.clone()
-    else:
-        new_a = a_clone
-        replace_child(parent_a, attr_a, node_b.clone())
-    
-    if parent_b is None:
-        new_b = node_a.clone()
-    else:
-        new_b = b_clone
-        replace_child(parent_b, attr_b, node_a.clone())
-    
-    # Store crossover info for later learning (move features to CPU for storage)
-    if use_learned:
-        crossover_history.append({
-            'a_features': feat_a.cpu(),
-            'b_features': feat_b.cpu(),
-            'a_idx': a_idx,
-            'b_idx': b_idx,
-            'offspring': (new_a, new_b)
-        })
-    
-    return new_a, new_b
-
-def update_selector(pop: List[Node], scores: List[float], inputs, y):
-    """Update the subtree selector using A2C (Advantage Actor-Critic)."""
-    global subtree_selector, selector_optimizer, crossover_history
-    
-    if not crossover_history or subtree_selector is None:
-        return
-    
-    # Evaluate offspring fitness (rewards)
-    rewards = []
-    features_a = []
-    features_b = []
-    
-    for record in crossover_history:
-        child1, child2 = record['offspring']
-        fitness1 = fitness(child1, inputs, y)
-        fitness2 = fitness(child2, inputs, y)
-        
-        # Reward is negative fitness (lower is better)
-        # Compare to average population fitness
-        avg_fitness = sum(scores) / len(scores)
-        reward = avg_fitness - min(fitness1, fitness2)
-        
-        rewards.append(reward)
-        features_a.append(record['a_features'])
-        features_b.append(record['b_features'])
-    
-    if not rewards:
-        return
-    
-    # Convert to tensors
-    rewards_tensor = torch.tensor(rewards, dtype=torch.float32, device=DEVICE)
-    
-    # Skip update if rewards are all the same or invalid
-    if rewards_tensor.std() < 1e-8 or torch.isnan(rewards_tensor).any():
-        crossover_history.clear()
-        return
-    
-    # Move features to device
-    features_a_batch = torch.stack(features_a).to(DEVICE)
-    features_b_batch = torch.stack(features_b).to(DEVICE)
-    
-    # Forward pass to get action logits and value estimates
-    action_logits_a, values_a = subtree_selector(features_a_batch, return_value=True)
-    action_logits_b, values_b = subtree_selector(features_b_batch, return_value=True)
-    
-    # Get log probabilities of selected actions
-    log_probs_a = torch.log_softmax(action_logits_a, dim=0)
-    log_probs_b = torch.log_softmax(action_logits_b, dim=0)
-    
-    selected_log_probs_a = torch.stack([log_probs_a[record['a_idx']] for record in crossover_history])
-    selected_log_probs_b = torch.stack([log_probs_b[record['b_idx']] for record in crossover_history])
-    
-    # Combine log probabilities
-    selected_log_probs = selected_log_probs_a + selected_log_probs_b
-    
-    # Get value estimates for selected states
-    selected_values_a = torch.stack([values_a[record['a_idx']] for record in crossover_history])
-    selected_values_b = torch.stack([values_b[record['b_idx']] for record in crossover_history])
-    selected_values = (selected_values_a + selected_values_b) / 2.0
-    
-    # Compute advantages (A = R - V)
-    advantages = rewards_tensor - selected_values.detach()
-    
-    # Actor loss: -log_prob * advantage (policy gradient)
-    actor_loss = -torch.mean(selected_log_probs * advantages)
-    
-    # Critic loss: MSE between predicted values and actual rewards
-    critic_loss = torch.mean((rewards_tensor - selected_values) ** 2)
-    
-    # Combined loss with critic weight
-    critic_weight = 0.5
-    entropy_weight = 0.01
-    
-    # Add entropy bonus to encourage exploration
-    probs_a = torch.softmax(action_logits_a, dim=0)
-    probs_b = torch.softmax(action_logits_b, dim=0)
-    entropy_a = -torch.sum(probs_a * torch.log(probs_a + 1e-10))
-    entropy_b = -torch.sum(probs_b * torch.log(probs_b + 1e-10))
-    entropy_loss = -(entropy_a + entropy_b) / 2.0
-    
-    total_loss = actor_loss + critic_weight * critic_loss + entropy_weight * entropy_loss
-    
-    # Backpropagation
-    if not torch.isnan(total_loss) and not torch.isinf(total_loss):
-        selector_optimizer.zero_grad()
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(subtree_selector.parameters(), max_norm=1.0)
-        selector_optimizer.step()
-    
-    # Clear history
-    crossover_history.clear()
-
+selector_feature_dim = None
 
 # Genetic algorithm
 def run_ga(
@@ -746,6 +642,7 @@ def run_ga(
     temperature=0.5,
     critic_weight=0.5,
     entropy_weight=0.01,
+    use_pareto=False,
     opt_constants=False,  # Renamed to avoid shadowing the function
     const_opt_freq=5,
     const_opt_method='L-BFGS-B',
@@ -753,9 +650,10 @@ def run_ga(
     verbose=False,
     print_freq=1,
     seed=DEFAULT_SEED,
-    metrics_callback=None
+    metrics_callback=None,
+    allow_pow=False,
 ):
-    global subtree_selector, selector_optimizer
+    global subtree_selector, selector_optimizer, crossover_history, selector_feature_dim
     
     if seed is None:
         seed = DEFAULT_SEED
@@ -782,10 +680,23 @@ def run_ga(
         UNARY_FUNCS = dict(DEFAULT_UNARY_FUNCS)
         SYMPY_UNARY = {name: DEFAULT_SYMPY_UNARY[name] for name in UNARY_FUNCS}
         ALL_UNARY = list(UNARY_FUNCS.keys())
+
+    # Configure binary functions (optional pow support)
+    global BINARY_FUNCS, SYMPY_BINARY, ALL_BINARY
+    BINARY_FUNCS = dict(BASE_BINARY_FUNCS)
+    SYMPY_BINARY = dict(BASE_SYMPY_BINARY)
+    if allow_pow:
+        BINARY_FUNCS["pow"] = ppow
+        SYMPY_BINARY["pow"] = lambda a, b: a ** b
+    ALL_BINARY = list(BINARY_FUNCS.keys())
+
+    # Reset crossover history whenever we start a new GA run so feature sizes stay consistent
+    crossover_history = []
+    selector_feature_dim = get_selector_feature_dim()
     
     init_max_depth = max(1, max_init_depth)
     pop = [
-        random_tree_custom(
+        random_tree(
             max_depth=random.randint(1, init_max_depth),
             prob_const=prob_const,
             const_range=const_range,
@@ -851,20 +762,19 @@ def run_ga(
 
     gen_iterator = tqdm(range(gens), desc="GA generations", unit="gen")  # Changed from trange
     for gen in gen_iterator:
-        # Optimize constants periodically
-        if opt_constants and gen > 0 and gen % const_opt_freq == 0:  # Changed variable name
-            if verbose:
-                print(f"\nOptimizing constants at generation {gen+1}...")
-            for i in range(len(pop)):
-                pop[i] = optimize_constants(pop[i], inputs, y, 
-                                           method=const_opt_method,
-                                           maxiter=const_opt_maxiter)
-        
-        scores = [fitness_custom(ind, inputs, y, complexity_coef, inclusion_coef) for ind in pop]
+        scores = [fitness(ind, inputs, y, complexity_coef, inclusion_coef) for ind in pop]
+        if use_pareto:
+            pareto_objectives_list = [
+                pareto_objectives(ind, inputs, y, inclusion_coef)
+                for ind in pop
+            ]
+            pareto_ranks, pareto_crowding = pareto_rank_and_crowding(pareto_objectives_list)
+        else:
+            pareto_ranks, pareto_crowding = None, None
         
         # Update selector every few generations
         if use_learned_crossover and gen > 0 and gen % selector_update_freq == 0:
-            update_selector_custom(
+            update_selector(
                 pop,
                 scores,
                 inputs,
@@ -873,6 +783,7 @@ def run_ga(
                 inclusion_coef,
                 critic_weight=critic_weight,
                 entropy_weight=entropy_weight,
+                current_gen=gen,
             )
         
         # track best
@@ -910,44 +821,81 @@ def run_ga(
         
         next_pop = []
         # elitism
-        sorted_idx = sorted(range(len(pop)), key=lambda i: scores[i])
+        if use_pareto and pareto_ranks is not None and pareto_crowding is not None:
+            sorted_idx = sorted(
+                range(len(pop)),
+                key=lambda i: (pareto_ranks[i], -pareto_crowding[i], scores[i])
+            )
+        else:
+            sorted_idx = sorted(range(len(pop)), key=lambda i: scores[i])
+        # Optimize constants only for elites (optional, periodic)
+        optimize_elites = opt_constants and gen > 0 and gen % const_opt_freq == 0
+        if optimize_elites and verbose:
+            print(f"\nOptimizing constants for elites at generation {gen+1}...")
         for i in range(elitism):
             elite = pop[sorted_idx[i]].clone()
-            elite = simplify_node_with_timeout(elite, simplify_timeout)
+            if optimize_elites:
+                elite = optimize_constants(
+                    elite,
+                    inputs,
+                    y,
+                    method=const_opt_method,
+                    maxiter=const_opt_maxiter,
+                )
+            if simplify_new_genomes:
+                elite = simplify_node_with_timeout(elite, simplify_timeout)
             next_pop.append(elite)
         # produce rest
         while len(next_pop) < pop_size:
             if random.random() < crossover_rate:
                 try:
-                    parent1 = tournament_select(pop, scores, tournament_k)
+                    if use_pareto and pareto_ranks is not None and pareto_crowding is not None:
+                        parent1 = tournament_select_pareto(pop, pareto_ranks, pareto_crowding, scores, tournament_k)
+                    else:
+                        parent1 = tournament_select(pop, scores, tournament_k)
                 except RecursionError:
                     parent1 = random.choice(pop).clone()
                 try:
-                    parent2 = tournament_select(pop, scores, tournament_k)
+                    if use_pareto and pareto_ranks is not None and pareto_crowding is not None:
+                        parent2 = tournament_select_pareto(pop, pareto_ranks, pareto_crowding, scores, tournament_k)
+                    else:
+                        parent2 = tournament_select(pop, scores, tournament_k)
                 except RecursionError:
                     parent2 = random.choice(pop).clone()
-                child1, child2 = learned_subtree_crossover_custom(
-                    parent1, parent2, use_learned=use_learned_crossover, temperature=temperature
+                child1, child2, history_idx = learned_subtree_crossover(
+                    parent1,
+                    parent2,
+                    use_learned=use_learned_crossover,
+                    temperature=temperature,
+                    record_gen=gen,
                 )
                 # optionally mutate children
                 if random.random() < mutation_rate:
-                    child1 = subtree_mutation_custom(child1, max_depth, prob_const, const_range)
+                    child1 = subtree_mutation(child1, max_depth, prob_const, const_range)
                 if random.random() < mutation_rate:
-                    child2 = subtree_mutation_custom(child2, max_depth, prob_const, const_range)
+                    child2 = subtree_mutation(child2, max_depth, prob_const, const_range)
                 if simplify_new_genomes:
                     child1 = simplify_node_with_timeout(child1, simplify_timeout)
                     child2 = simplify_node_with_timeout(child2, simplify_timeout)
+                if history_idx is not None and 0 <= history_idx < len(crossover_history):
+                    crossover_history[history_idx]['offspring'] = (
+                        child1.clone(),
+                        child2.clone(),
+                    )
                 next_pop.append(child1)
                 if len(next_pop) < pop_size:
                     next_pop.append(child2)
             else:
                 try:
-                    parent = tournament_select(pop, scores, tournament_k)
+                    if use_pareto and pareto_ranks is not None and pareto_crowding is not None:
+                        parent = tournament_select_pareto(pop, pareto_ranks, pareto_crowding, scores, tournament_k)
+                    else:
+                        parent = tournament_select(pop, scores, tournament_k)
                 except RecursionError:
                     parent = random.choice(pop).clone()
                 child = parent
                 if random.random() < mutation_rate:
-                    child = subtree_mutation_custom(child, max_depth, prob_const, const_range)
+                    child = subtree_mutation(child, max_depth, prob_const, const_range)
                 # small point mutations
                 child = point_mutation(child, prob_change=point_mutation_prob)
                 if simplify_new_genomes:
@@ -987,31 +935,50 @@ def run_ga(
     return best, best_r2
 
 
-# Custom versions with parameters
-def random_tree_custom(max_depth: int, prob_const=0.3, const_range=(-5, 5)) -> Node:
+# Random tree generation with configurable constants
+def random_tree(max_depth: int, prob_const=0.3, const_range=(-5, 5)) -> Node:
     if max_depth == 0:
         if random.random() < prob_const:
             return Const(random.uniform(*const_range))
-        else:
-            return Var()
-    else:
-        r = random.random()
-        if r < 0.2:
-            return Const(random.uniform(*const_range))
-        elif r < 0.4:
-            return Var()
-        elif r < 0.7:
-            func = random.choice(ALL_UNARY)
-            return Unary(func, random_tree_custom(max_depth - 1, prob_const, const_range))
-        else:
+        return Var()
+
+    # Build choices dynamically so empty operator sets don't crash.
+    choices = ["const", "var"]
+    weights = [0.2, 0.2]
+    if ALL_UNARY:
+        choices.append("unary")
+        weights.append(0.3)
+    if ALL_BINARY:
+        choices.append("binary")
+        weights.append(0.3)
+
+    total = sum(weights)
+    pick = random.random() * total
+    cumulative = 0.0
+    for choice, weight in zip(choices, weights):
+        cumulative += weight
+        if pick <= cumulative:
+            if choice == "const":
+                return Const(random.uniform(*const_range))
+            if choice == "var":
+                return Var()
+            if choice == "unary":
+                func = random.choice(ALL_UNARY)
+                return Unary(func, random_tree(max_depth - 1, prob_const, const_range))
             func = random.choice(ALL_BINARY)
-            return Binary(func, 
-                         random_tree_custom(max_depth - 1, prob_const, const_range), 
-                         random_tree_custom(max_depth - 1, prob_const, const_range))
+            return Binary(
+                func,
+                random_tree(max_depth - 1, prob_const, const_range),
+                random_tree(max_depth - 1, prob_const, const_range),
+            )
+
+    # Fallback (should not hit)
+    return Var()
 
 
-def fitness_custom(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray, 
-                   complexity_coef=1e-3, inclusion_coef=1.0) -> float:
+# Fitness: mean squared error + complexity penalty
+def fitness(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray, 
+            complexity_coef=1e-3, inclusion_coef=1.0) -> float:
     try:
         y_pred = ind.evaluate(inputs)
         if np.any(np.isinf(y_pred)) or np.any(np.isnan(y_pred)):
@@ -1025,11 +992,11 @@ def fitness_custom(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray,
     return mse + complexity_coef * ind.size() + inclusion_penalty
 
 
-def subtree_mutation_custom(ind: Node, max_depth: int, prob_const=0.3, const_range=(-5, 5)) -> Node:
+def subtree_mutation(ind: Node, max_depth: int, prob_const=0.3, const_range=(-5, 5)) -> Node:
     ind_clone = ind.clone()
     nodes = collect_nodes_with_parents(ind_clone)
     node, parent, attr = random.choice(nodes)
-    new_sub = random_tree_custom(max_depth=random.randint(0, max_depth), prob_const=prob_const, const_range=const_range)
+    new_sub = random_tree(max_depth=random.randint(0, max_depth), prob_const=prob_const, const_range=const_range)
     if parent is None:
         return new_sub
     else:
@@ -1037,15 +1004,29 @@ def subtree_mutation_custom(ind: Node, max_depth: int, prob_const=0.3, const_ran
         return ind_clone
 
 
-def learned_subtree_crossover_custom(a: Node, b: Node, use_learned=True, temperature=0.5) -> Tuple[Node, Node]:
+def learned_subtree_crossover(
+    a: Node,
+    b: Node,
+    use_learned=True,
+    temperature=0.5,
+    record_gen: int | None = None,
+) -> Tuple[Node, Node, int | None]:
     """Crossover using learned subtree selection with custom temperature."""
-    global subtree_selector
+    global subtree_selector, selector_feature_dim, crossover_history
     
     a_clone = a.clone()
     b_clone = b.clone()
     a_nodes = collect_nodes_with_features(a_clone)
     b_nodes = collect_nodes_with_features(b_clone)
     
+    a_features = None
+    b_features = None
+    
+    expected_dim = get_selector_feature_dim()
+    if selector_feature_dim is not None and expected_dim != selector_feature_dim:
+        use_learned = False
+        crossover_history.clear()
+
     if use_learned and subtree_selector is not None:
         # Use neural network to select crossover points
         with torch.no_grad():
@@ -1061,8 +1042,9 @@ def learned_subtree_crossover_custom(a: Node, b: Node, use_learned=True, tempera
             b_scores = torch.clamp(b_scores, -10, 10)
             
             # Sample from softmax distribution with custom temperature
-            a_probs = torch.softmax(a_scores / temperature, dim=0)
-            b_probs = torch.softmax(b_scores / temperature, dim=0)
+            safe_temp = max(float(temperature), 1e-6)
+            a_probs = torch.softmax(a_scores / safe_temp, dim=0)
+            b_probs = torch.softmax(b_scores / safe_temp, dim=0)
             
             # Additional safety check
             if torch.isnan(a_probs).any() or torch.isinf(a_probs).any() or (a_probs < 0).any():
@@ -1096,115 +1078,132 @@ def learned_subtree_crossover_custom(a: Node, b: Node, use_learned=True, tempera
         replace_child(parent_b, attr_b, node_a.clone())
     
     # Store crossover info for later learning
-    if use_learned:
+    history_idx = None
+    if use_learned and a_features is not None and b_features is not None:
         crossover_history.append({
-            'a_features': feat_a.cpu(),
-            'b_features': feat_b.cpu(),
+            'a_features_all': a_features.cpu(),
+            'b_features_all': b_features.cpu(),
             'a_idx': a_idx,
             'b_idx': b_idx,
-            'offspring': (new_a, new_b)
+            'offspring': (new_a.clone(), new_b.clone()),
+            'gen': record_gen,
         })
+        history_idx = len(crossover_history) - 1
     
-    return new_a, new_b
+    return new_a, new_b, history_idx
 
 
-def update_selector_custom(pop: List[Node], scores: List[float], inputs, y, complexity_coef=1e-3,
-                           inclusion_coef=1.0, critic_weight=0.5, entropy_weight=0.01):
-    global subtree_selector, selector_optimizer, crossover_history, A2C_PARAMS
+def update_selector(
+    pop: List[Node],
+    scores: List[float],
+    inputs,
+    y,
+    complexity_coef=1e-3,
+    inclusion_coef=1.0,
+    critic_weight=0.5,
+    entropy_weight=0.01,
+    current_gen: int | None = None,
+):
+    global subtree_selector, selector_optimizer, crossover_history
     
     if not crossover_history or subtree_selector is None:
         return
     
+    # Filter history to only include records matching the current feature dimension
+    expected_dim = get_selector_feature_dim()
+    latest_gen = None
+    available_gens = []
+    for record in crossover_history:
+        if 'gen' in record and record['gen'] is not None:
+            available_gens.append(record['gen'])
+
+    if available_gens:
+        latest_gen = max(available_gens)
+        if current_gen is not None:
+            desired_gen = current_gen - 1
+            if desired_gen in available_gens:
+                latest_gen = desired_gen
+
+    filtered_history = []
+    for record in crossover_history:
+        if record['a_features_all'].dim() != 2 or record['b_features_all'].dim() != 2:
+            continue
+        if record['a_features_all'].size(-1) != expected_dim:
+            continue
+        if record['b_features_all'].size(-1) != expected_dim:
+            continue
+        if latest_gen is not None and record.get('gen') != latest_gen:
+            continue
+        filtered_history.append(record)
+    if not filtered_history:
+        crossover_history.clear()
+        return
+
     # Evaluate offspring fitness (rewards)
     rewards = []
-    features_a = []
-    features_b = []
-    
-    for record in crossover_history:
+    avg_fitness = sum(scores) / len(scores) if scores else 0.0
+
+    for record in filtered_history:
         child1, child2 = record['offspring']
-        fitness1 = fitness_custom(child1, inputs, y, complexity_coef, inclusion_coef)
-        fitness2 = fitness_custom(child2, inputs, y, complexity_coef, inclusion_coef)
-        
-        # Reward is negative fitness (lower is better)
-        avg_fitness = sum(scores) / len(scores)
+        fitness1 = fitness(child1, inputs, y, complexity_coef, inclusion_coef)
+        fitness2 = fitness(child2, inputs, y, complexity_coef, inclusion_coef)
         reward = avg_fitness - min(fitness1, fitness2)
-        
         rewards.append(reward)
-        features_a.append(record['a_features'])
-        features_b.append(record['b_features'])
-    
+
     if not rewards:
+        crossover_history.clear()
         return
-    
+
     # Convert to tensors
     rewards_tensor = torch.tensor(rewards, dtype=torch.float32, device=DEVICE)
-    
+
     # Skip update if rewards are all the same or invalid
     if rewards_tensor.std() < 1e-8 or torch.isnan(rewards_tensor).any():
         crossover_history.clear()
         return
-    
-    # Move features to device
-    features_a_batch = torch.stack(features_a).to(DEVICE)
-    features_b_batch = torch.stack(features_b).to(DEVICE)
-    
-    # Forward pass to get action logits and value estimates
-    action_logits_a, values_a = subtree_selector(features_a_batch, return_value=True)
-    action_logits_b, values_b = subtree_selector(features_b_batch, return_value=True)
-    
-    # Get log probabilities of selected actions
-    log_probs_a = torch.log_softmax(action_logits_a, dim=0)
-    log_probs_b = torch.log_softmax(action_logits_b, dim=0)
-    try:
-        selected_log_probs_a = torch.stack([log_probs_a[record['a_idx']] for record in crossover_history])
-        selected_log_probs_b = torch.stack([log_probs_b[record['b_idx']] for record in crossover_history])
-    except IndexError:
-        selected_log_probs_a = torch.zeros(len(crossover_history), device=DEVICE)
-        selected_log_probs_b = torch.zeros(len(crossover_history), device=DEVICE)
 
-    # Combine log probabilities
-    selected_log_probs = selected_log_probs_a + selected_log_probs_b
-    
-    # Compute advantages based on whether critic is enabled
-    if subtree_selector.use_critic and values_a is not None and values_b is not None:
-        # A2C: Advantages = R - V(s)
-        try:
-            selected_values_a = torch.stack([values_a[record['a_idx']] for record in crossover_history])
-            selected_values_b = torch.stack([values_b[record['b_idx']] for record in crossover_history])
-        except IndexError:
-            selected_values_a = torch.zeros(len(crossover_history), device=DEVICE)
-            selected_values_b = torch.zeros(len(crossover_history), device=DEVICE)
-        selected_values = (selected_values_a + selected_values_b) / 2.0
-        
+    selected_log_probs = []
+    selected_values = []
+    entropies = []
+
+    for record in filtered_history:
+        a_features = record['a_features_all'].to(DEVICE)
+        b_features = record['b_features_all'].to(DEVICE)
+        a_idx = record['a_idx']
+        b_idx = record['b_idx']
+
+        action_logits_a, values_a = subtree_selector(a_features, return_value=True)
+        action_logits_b, values_b = subtree_selector(b_features, return_value=True)
+
+        log_probs_a = torch.log_softmax(action_logits_a, dim=0)
+        log_probs_b = torch.log_softmax(action_logits_b, dim=0)
+        selected_log_probs.append(log_probs_a[a_idx] + log_probs_b[b_idx])
+
+        probs_a = torch.softmax(action_logits_a, dim=0)
+        probs_b = torch.softmax(action_logits_b, dim=0)
+        entropy_a = -torch.sum(probs_a * torch.log(probs_a + 1e-10))
+        entropy_b = -torch.sum(probs_b * torch.log(probs_b + 1e-10))
+        entropies.append((entropy_a + entropy_b) / 2.0)
+
+        if subtree_selector.use_critic and values_a is not None and values_b is not None:
+            selected_values.append((values_a[a_idx] + values_b[b_idx]) / 2.0)
+
+    selected_log_probs = torch.stack(selected_log_probs)
+
+    if subtree_selector.use_critic and selected_values:
+        selected_values = torch.stack(selected_values)
         advantages = rewards_tensor - selected_values.detach()
-        
-        # Actor loss: -log_prob * advantage (policy gradient)
         actor_loss = -torch.mean(selected_log_probs * advantages)
-        
-        # Critic loss: MSE between predicted values and actual rewards
         critic_loss = torch.mean((rewards_tensor - selected_values) ** 2)
-        
         critic_weight_local = critic_weight
     else:
-        # Pure policy gradient (REINFORCE): Advantages = R (no baseline)
-        advantages = rewards_tensor
-        
-        # Actor loss: -log_prob * reward
-        actor_loss = -torch.mean(selected_log_probs * advantages)
-        
-        # No critic loss
+        actor_loss = -torch.mean(selected_log_probs * rewards_tensor)
         critic_loss = torch.tensor(0.0, device=DEVICE)
         critic_weight_local = 0.0
-    
+
     entropy_weight_local = entropy_weight
-    
-    # Add entropy bonus to encourage exploration
-    probs_a = torch.softmax(action_logits_a, dim=0)
-    probs_b = torch.softmax(action_logits_b, dim=0)
-    entropy_a = -torch.sum(probs_a * torch.log(probs_a + 1e-10))
-    entropy_b = -torch.sum(probs_b * torch.log(probs_b + 1e-10))
-    entropy_loss = -(entropy_a + entropy_b) / 2.0
-    
+    entropy_loss = -torch.mean(torch.stack(entropies)) if entropies else torch.tensor(0.0, device=DEVICE)
+
     total_loss = actor_loss + critic_weight_local * critic_loss + entropy_weight_local * entropy_loss
     
     # Backpropagation
@@ -1228,7 +1227,7 @@ def optimize_constants(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarra
         return ind  # No constants to optimize
     
     # Extract initial values
-    initial_values = np.array([node.value for node in const_nodes])
+    initial_values = np.array([node.value for node in const_nodes], dtype=float)
     
     # Define objective function (MSE)
     def objective(const_values):
@@ -1258,8 +1257,12 @@ def optimize_constants(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarra
         if result.success:
             for node, val in zip(const_nodes, result.x):
                 node.value = float(val)
+        else:
+            for node, val in zip(const_nodes, initial_values):
+                node.value = float(val)
     except Exception:
-        pass  # If optimization fails, keep original values
+        for node, val in zip(const_nodes, initial_values):
+            node.value = float(val)
     
     return ind
 
@@ -1451,6 +1454,8 @@ def sympy_to_node(expr: sp.Expr) -> Node:
             node = Binary('div', node, sympy_to_node(arg))
         return node
     if isinstance(expr, sp.Pow):
+        if 'pow' in ALL_BINARY:
+            return Binary('pow', sympy_to_node(expr.base), sympy_to_node(expr.exp))
         if expr.exp == -1:
             return Binary('div', Const(1.0), sympy_to_node(expr.base))
         if expr.exp == 2:
@@ -1473,3 +1478,7 @@ def simplify_node_with_timeout(node: Node, timeout: float | None) -> Node:
         return sympy_to_node(simplified_expr)
     except ValueError:
         return node
+
+
+if __name__ == "__main__":
+    _print_device_info()
