@@ -6,3 +6,10 @@ papers/
 dataset/
 logs/
 /__pycache__/
+*.pyc
+all_results.csv
+all_results.tex
+all_results_summary.csv
+iv_curve.pdf
+topology.pdf
+shards/
