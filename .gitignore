@@ -1,15 +1,38 @@
-pairplot.pdf
-predict*.pdf
-output.png
-papers/
+# --- Python ---
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+.env
+
+# --- Editors / OS ---
 .vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Local folders ---
+papers/
 dataset/
 logs/
-/__pycache__/
-*.pyc
-all_results.csv
-all_results.tex
-all_results_summary.csv
-iv_curve.pdf
-topology.pdf
 shards/
+
+# --- Generated plots / images ---
+*.pdf
+*.png
+
+# --- Generated results ---
+*_results.csv
+*_results.tex
+all_results*.csv
+all_results.tex
+results.csv
+eqns.tex
+tmp_*.json
+
+# --- Optuna / SQLite studies ---
+*.db
+*.db-journal
