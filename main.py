@@ -135,6 +135,10 @@ class Node:
     def clone(self) -> "Node":
         raise NotImplementedError
 
+    def key(self):
+        """Hashable structural identity (operators, variable names, exact constant values)."""
+        raise NotImplementedError
+
     def size(self) -> int:
         raise NotImplementedError
 
@@ -157,6 +161,9 @@ class Const(Node):
 
     def clone(self):
         return Const(self.value)
+
+    def key(self):
+        return self.value
 
     def evaluate(self, inputs):
         reference = next(iter(inputs.values()))
@@ -185,6 +192,9 @@ class Var(Node):
     def clone(self):
         return Var(self.name)
 
+    def key(self):
+        return self.name
+
     def evaluate(self, inputs):
         return inputs[self.name]
 
@@ -211,6 +221,9 @@ class Unary(Node):
 
     def clone(self):
         return Unary(self.func_name, self.child.clone())
+
+    def key(self):
+        return (self.func_name, self.child.key())
 
     def evaluate(self, inputs):
         f = UNARY_FUNCS[self.func_name]
@@ -241,6 +254,9 @@ class Binary(Node):
 
     def clone(self):
         return Binary(self.func_name, self.left.clone(), self.right.clone())
+
+    def key(self):
+        return (self.func_name, self.left.key(), self.right.key())
 
     def evaluate(self, inputs):
         f = BINARY_FUNCS[self.func_name]
@@ -399,6 +415,8 @@ def _activation(name: str) -> nn.Module:
 class SubtreeSelector(nn.Module):
     """Scores every node independently with an MLP; a pair's logit is the sum of its two node logits."""
 
+    needs_distances = False
+
     def __init__(self, feature_dim=10, hidden_dim=64, mlp_layers=3, mlp_activation='relu',
                  mlp_dropout=0.0, use_critic=True):
         super().__init__()
@@ -424,14 +442,15 @@ class SubtreeSelector(nn.Module):
             return logits
         return logits, (self.critic(shared).squeeze(-1) if self.use_critic else None)
 
-    def score_pairs(self, a_feats: torch.Tensor, b_feats: torch.Tensor):
-        """Joint logits (Na, Nb) over node pairs, and critic values (Na, Nb) or None."""
-        a_logits, a_values = self(a_feats, return_value=True)
-        b_logits, b_values = self(b_feats, return_value=True)
-        logits = a_logits.unsqueeze(1) + b_logits.unsqueeze(0)
+    def score_pairs(self, a, b):
+        """Joint logits (B, La, Lb) over node pairs, and critic values (B, La, Lb) or None.
+        a and b are PairBatch sides; padded positions are masked out by the caller."""
+        a_logits, a_values = self(a.feats, return_value=True)
+        b_logits, b_values = self(b.feats, return_value=True)
+        logits = a_logits.unsqueeze(2) + b_logits.unsqueeze(1)
         if a_values is None:
             return logits, None
-        return logits, (a_values.unsqueeze(1) + b_values.unsqueeze(0)) / 2.0
+        return logits, (a_values.unsqueeze(2) + b_values.unsqueeze(1)) / 2.0
 
 
 class PairSelector(nn.Module):
@@ -439,8 +458,10 @@ class PairSelector(nn.Module):
 
     Nodes are embedded by an MLP, refined by self-attention within their own tree (with a
     tree-distance bias so attention knows the structure) and cross-attention to the other
-    parent, and every pair (i, j) is scored by a bilinear term plus an MLP on [h_i, h_j, h_i*h_j].
+    parent, and every pair (i, j) is scored by a bilinear term plus an MLP on [h_i, g_j, h_i*g_j].
     """
+
+    needs_distances = True
 
     def __init__(self, feature_dim=10, hidden_dim=64, num_heads=4, num_layers=1, mlp_activation='relu',
                  use_critic=True):
@@ -458,64 +479,89 @@ class PairSelector(nn.Module):
         self.max_dist = 8
         self.dist_bias = nn.Embedding(self.max_dist + 1, num_heads)
         self.bilinear = nn.Linear(hidden_dim, hidden_dim, bias=False)
-        self.pair_mlp = nn.Sequential(nn.Linear(3 * hidden_dim, hidden_dim), _activation(mlp_activation),
-                                      nn.Linear(hidden_dim, 1))
+        # First layer of the pair MLP on [h_i, g_j, h_i*g_j], split into its three blocks so the
+        # (B, La, Lb, hidden) grid is only built once, for the elementwise-product term
+        self.pair_h = nn.Linear(hidden_dim, hidden_dim)
+        self.pair_g = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.pair_hg = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.pair_act = _activation(mlp_activation)
+        self.pair_out = nn.Linear(hidden_dim, 1)
         if self.use_critic:
             self.critic = nn.Sequential(nn.Linear(2 * hidden_dim, hidden_dim), _activation(mlp_activation),
                                         nn.Linear(hidden_dim, 1))
         self.to(DEVICE)
 
-    def _encode(self, feats, dists, other, other_dists):
-        h, g = self.embed(feats).unsqueeze(0), self.embed(other).unsqueeze(0)
-        mask = -self.dist_bias(dists.clamp(max=self.max_dist)).permute(2, 0, 1)
-        other_mask = -self.dist_bias(other_dists.clamp(max=self.max_dist)).permute(2, 0, 1)
-        for k, (sa, ca) in enumerate(zip(self.self_attn, self.cross_attn)):
-            h = self.norms[2 * k](h + sa(h, h, h, attn_mask=mask, need_weights=False)[0])
-            g = self.norms[2 * k](g + sa(g, g, g, attn_mask=other_mask, need_weights=False)[0])
-            h, g = (self.norms[2 * k + 1](h + ca(h, g, g, need_weights=False)[0]),
-                    self.norms[2 * k + 1](g + ca(g, h, h, need_weights=False)[0]))
-        return h.squeeze(0), g.squeeze(0)
+    def _mask(self, key_valid, dists=None, n_queries=None):
+        """Float attention mask (B*heads, Lq, Lk): distance bias, and -1e9 on padded keys."""
+        if dists is not None:
+            mask = self.dist_bias(dists.clamp(max=self.max_dist)).permute(0, 3, 1, 2)
+        else:
+            mask = key_valid.new_zeros((key_valid.shape[0], self.num_heads, n_queries, key_valid.shape[1]),
+                                       dtype=torch.float32)
+        mask = mask.masked_fill(~key_valid[:, None, None, :], -1e9)
+        return mask.reshape(-1, mask.shape[2], mask.shape[3])
 
-    def score_pairs(self, a_feats, b_feats, a_dists, b_dists):
-        h, g = self._encode(a_feats, a_dists, b_feats, b_dists)
-        na, nb, d = h.shape[0], g.shape[0], h.shape[1]
-        hi = h.unsqueeze(1).expand(na, nb, d)
-        gj = g.unsqueeze(0).expand(na, nb, d)
-        logits = self.bilinear(h) @ g.T / d ** 0.5 + self.pair_mlp(torch.cat([hi, gj, hi * gj], -1)).squeeze(-1)
+    def score_pairs(self, a, b):
+        h, g = self.embed(a.feats), self.embed(b.feats)
+        a_self, b_self = self._mask(a.valid, a.dists), self._mask(b.valid, b.dists)
+        a_cross, b_cross = self._mask(b.valid, n_queries=h.shape[1]), self._mask(a.valid, n_queries=g.shape[1])
+        for k, (sa, ca) in enumerate(zip(self.self_attn, self.cross_attn)):
+            h = self.norms[2 * k](h + sa(h, h, h, attn_mask=a_self, need_weights=False)[0])
+            g = self.norms[2 * k](g + sa(g, g, g, attn_mask=b_self, need_weights=False)[0])
+            h, g = (self.norms[2 * k + 1](h + ca(h, g, g, attn_mask=a_cross, need_weights=False)[0]),
+                    self.norms[2 * k + 1](g + ca(g, h, h, attn_mask=b_cross, need_weights=False)[0]))
+        d = h.shape[-1]
+        hidden = (self.pair_h(h).unsqueeze(2) + self.pair_g(g).unsqueeze(1)
+                  + self.pair_hg(h.unsqueeze(2) * g.unsqueeze(1)))
+        logits = self.bilinear(h) @ g.transpose(1, 2) / d ** 0.5 + self.pair_out(self.pair_act(hidden)).squeeze(-1)
         if not self.use_critic:
             return logits, None
-        # Value of the parent pair as a whole, shared by all of its node pairs
-        value = self.critic(torch.cat([h.mean(0), g.mean(0)])).squeeze(-1)
-        return logits, value.expand(na, nb)
+        # Value of the parent pair as a whole (mean over real nodes), shared by all its node pairs
+        a_w, b_w = a.valid.unsqueeze(-1).float(), b.valid.unsqueeze(-1).float()
+        pooled = torch.cat([(h * a_w).sum(1) / a_w.sum(1), (g * b_w).sum(1) / b_w.sum(1)], -1)
+        return logits, self.critic(pooled).expand(-1, h.shape[1]).unsqueeze(-1).expand(-1, -1, g.shape[1])
 
 
 def heuristic_bias(a_feats: torch.Tensor, b_feats: torch.Tensor) -> torch.Tensor:
-    """Hand-crafted compatibility H(n_i, m_j) for every node pair of two parents."""
-    a_type = torch.argmax(a_feats[:, :4], dim=1)
-    b_type = torch.argmax(b_feats[:, :4], dim=1)
-    type_match = (a_type.unsqueeze(1) == b_type.unsqueeze(0)).to(a_feats.dtype)
-    size_gap = torch.abs(a_feats[:, 4].unsqueeze(1) - b_feats[:, 4].unsqueeze(0))
-    depth_gap = torch.abs(a_feats[:, 5].unsqueeze(1) - b_feats[:, 5].unsqueeze(0))
-    a_ops, b_ops = a_feats[:, 10:], b_feats[:, 10:]
-    op_match = a_ops @ b_ops.transpose(0, 1) if a_ops.numel() and b_ops.numel() else torch.zeros_like(type_match)
+    """Hand-crafted compatibility H(n_i, m_j) for every node pair of two (batched) parents: (B, La, Lb)."""
+    a_type = torch.argmax(a_feats[..., :4], dim=-1)
+    b_type = torch.argmax(b_feats[..., :4], dim=-1)
+    type_match = (a_type.unsqueeze(2) == b_type.unsqueeze(1)).to(a_feats.dtype)
+    size_gap = torch.abs(a_feats[..., 4].unsqueeze(2) - b_feats[..., 4].unsqueeze(1))
+    depth_gap = torch.abs(a_feats[..., 5].unsqueeze(2) - b_feats[..., 5].unsqueeze(1))
+    op_match = a_feats[..., 10:] @ b_feats[..., 10:].transpose(1, 2)
     return 0.15 * type_match + 0.20 * op_match - 0.10 * size_gap - 0.08 * depth_gap
 
 
-def pair_distribution(selector, a, b, temperature: float, heuristic_bias_scale: float):
-    """Flattened joint logits over (a_node, b_node) pairs and matching critic values (or None).
+PairSide = collections.namedtuple("PairSide", ["feats", "valid", "dists"])
 
-    a and b are (features, tree_distances) tuples. selector=None scores pairs by H alone.
-    """
+
+def make_side(feats: List[torch.Tensor], dists: List[torch.Tensor] | None = None) -> PairSide:
+    """Pad one parent side of a batch: feats (B, L, F), valid (B, L) and optional dists (B, L, L)."""
+    lengths = torch.tensor([f.shape[0] for f in feats], device=DEVICE)
+    padded = nn.utils.rnn.pad_sequence([f.to(DEVICE) for f in feats], batch_first=True)
+    valid = torch.arange(padded.shape[1], device=DEVICE).unsqueeze(0) < lengths.unsqueeze(1)
+    padded_dists = None
+    if dists is not None:
+        padded_dists = torch.zeros(len(feats), padded.shape[1], padded.shape[1], dtype=torch.long, device=DEVICE)
+        for i, dm in enumerate(dists):
+            padded_dists[i, :dm.shape[0], :dm.shape[1]] = dm
+    return PairSide(padded, valid, padded_dists)
+
+
+def pair_distribution(selector, a: PairSide, b: PairSide, temperature: float, heuristic_bias_scale: float):
+    """Flattened joint logits (B, La*Lb) over node pairs, padded pairs at -inf, and matching
+    critic values (B, La*Lb) or None. selector=None scores pairs by H alone."""
     if selector is None:
-        logits, values = torch.zeros(a[0].shape[0], b[0].shape[0], device=a[0].device), None
-    elif isinstance(selector, PairSelector):
-        logits, values = selector.score_pairs(a[0], b[0], a[1], b[1])
+        logits, values = torch.zeros(a.feats.shape[0], a.feats.shape[1], b.feats.shape[1], device=DEVICE), None
     else:
-        logits, values = selector.score_pairs(a[0], b[0])
+        logits, values = selector.score_pairs(a, b)
     if heuristic_bias_scale:
-        logits = logits + float(heuristic_bias_scale) * heuristic_bias(a[0], b[0])
-    flat = torch.clamp(logits / max(float(temperature), 1e-6), -10.0, 10.0).reshape(-1)
-    return flat, (values.reshape(-1) if values is not None else None)
+        logits = logits + float(heuristic_bias_scale) * heuristic_bias(a.feats, b.feats)
+    logits = torch.clamp(logits / max(float(temperature), 1e-6), -10.0, 10.0)
+    logits = logits.masked_fill(~(a.valid.unsqueeze(2) & b.valid.unsqueeze(1)), float('-inf'))
+    flat = logits.reshape(logits.shape[0], -1)
+    return flat, (values.reshape(values.shape[0], -1) if values is not None else None)
 
 
 def _node_features(node: Node, parent: Node | None, depth_from_root: int, size: int, depth: int,
@@ -586,6 +632,7 @@ subtree_selector = None
 selector_optimizer = None
 crossover_history = []
 SELECTOR_TYPE = 'mlp'
+PAIR_BATCH_BUDGET = 1 << 17  # max padded node pairs per batched selector forward pass
 
 
 def r2_score_of(y: np.ndarray, y_pred: np.ndarray) -> float | None:
@@ -764,6 +811,17 @@ def run_ga(
         except Exception:
             return None
 
+    # Many trees recur (elites, unchanged clones, offspring scored by the selector update)
+    fitness_cache = {}
+
+    def score(ind):
+        key = ind.key()
+        if key not in fitness_cache:
+            if len(fitness_cache) >= 200_000:
+                fitness_cache.clear()
+            fitness_cache[key] = score_individual(ind, inputs, y, complexity_coef, inclusion_coef)
+        return fitness_cache[key]
+
     best = None
     best_score = float('inf')
     best_r2 = None
@@ -771,7 +829,7 @@ def run_ga(
     for gen in tqdm(range(gens), desc="GA generations", unit="gen"):
         if LINEAR_TERMS:
             pop = [bake_linear(ind, inputs, y) for ind in pop]
-        scores, objectives = zip(*(score_individual(ind, inputs, y, complexity_coef, inclusion_coef) for ind in pop))
+        scores, objectives = zip(*(score(ind) for ind in pop))
         scores = list(scores)
         if use_pareto:
             ranks, crowding = pareto_rank_and_crowding(list(objectives))
@@ -783,10 +841,7 @@ def run_ga(
         learning = use_learned_crossover and gen >= max(1, int(selector_warmup_gens))
         if learning and gen % selector_update_freq == 0:
             update_selector(
-                inputs,
-                y,
-                complexity_coef,
-                inclusion_coef,
+                score,
                 critic_weight=critic_weight,
                 entropy_weight=entropy_weight,
                 recent_gen_window=selector_recent_gen_window,
@@ -1196,13 +1251,18 @@ def learned_subtree_crossover(
     use_selector = use_learned and (subtree_selector is not None or SELECTOR_TYPE == 'heuristic')
 
     if use_selector:
-        with_dists = isinstance(subtree_selector, PairSelector)
+        with_dists = getattr(subtree_selector, 'needs_distances', False)
         a_nodes, a_feats, a_dists = collect_nodes_with_features(a_clone, with_dists)
         b_nodes, b_feats, b_dists = collect_nodes_with_features(b_clone, with_dists)
         with torch.no_grad():
-            flat_logits, _ = pair_distribution(subtree_selector, (a_feats, a_dists), (b_feats, b_dists),
-                                               temperature, heuristic_bias_scale)
-            probs = torch.softmax(flat_logits, dim=0)
+            flat_logits, _ = pair_distribution(
+                subtree_selector,
+                make_side([a_feats], [a_dists] if with_dists else None),
+                make_side([b_feats], [b_dists] if with_dists else None),
+                temperature,
+                heuristic_bias_scale,
+            )
+            probs = torch.softmax(flat_logits[0], dim=0)
             probs = torch.clamp(probs, min=1e-8)
             probs = probs / probs.sum()
             flat_idx = int(torch.multinomial(probs, 1).item()) if probs.numel() > 1 else 0
@@ -1232,7 +1292,8 @@ def learned_subtree_crossover(
         crossover_history.append({
             'a': (a_feats.cpu(), None if a_dists is None else a_dists.cpu()),
             'b': (b_feats.cpu(), None if b_dists is None else b_dists.cpu()),
-            'flat_idx': flat_idx,
+            'a_idx': a_idx,
+            'b_idx': b_idx,
             'parents': (a, b),
             'parent_scores': parent_scores,
             'offspring': (new_a.clone(), new_b.clone()),
@@ -1244,10 +1305,7 @@ def learned_subtree_crossover(
 
 
 def update_selector(
-    inputs,
-    y,
-    complexity_coef=1e-3,
-    inclusion_coef=1.0,
+    score_fn,
     critic_weight=0.5,
     entropy_weight=0.01,
     recent_gen_window=2,
@@ -1281,8 +1339,8 @@ def update_selector(
         if record['parent_scores'] is not None:
             parent_best = min(record['parent_scores'])
         else:
-            parent_best = min(fitness(p, inputs, y, complexity_coef, inclusion_coef) for p in record['parents'])
-        child_best = min(fitness(c, inputs, y, complexity_coef, inclusion_coef) for c in record['offspring'])
+            parent_best = min(score_fn(p)[0] for p in record['parents'])
+        child_best = min(score_fn(c)[0] for c in record['offspring'])
         rewards.append(parent_best - child_best)
     mean_reward = float(np.mean(rewards))
     crossover_history.clear()
@@ -1295,27 +1353,43 @@ def update_selector(
     if reward_clip is not None and reward_clip > 0:
         rewards = torch.clamp(rewards, -float(reward_clip), float(reward_clip))
 
-    log_probs, values, entropies = [], [], []
-    for record in history:
-        a = tuple(None if t is None else t.to(DEVICE) for t in record['a'])
-        b = tuple(None if t is None else t.to(DEVICE) for t in record['b'])
+    # Batched forward passes over chunks of similarly sized parent pairs
+    with_dists = getattr(subtree_selector, 'needs_distances', False)
+    order = sorted(range(len(history)), key=lambda i: history[i]['a'][0].shape[0] * history[i]['b'][0].shape[0])
+    chunks, chunk, max_a, max_b = [], [], 0, 0
+    for i in order:
+        la, lb = history[i]['a'][0].shape[0], history[i]['b'][0].shape[0]
+        if chunk and (len(chunk) + 1) * max(max_a, la) * max(max_b, lb) > PAIR_BATCH_BUDGET:
+            chunks.append(chunk)
+            chunk, max_a, max_b = [], 0, 0
+        chunk.append(i)
+        max_a, max_b = max(max_a, la), max(max_b, lb)
+    chunks.append(chunk)
+
+    log_probs, values, entropies, chunk_rewards = [], [], [], []
+    for chunk in chunks:
+        recs = [history[i] for i in chunk]
+        a = make_side([r['a'][0] for r in recs], [r['a'][1] for r in recs] if with_dists else None)
+        b = make_side([r['b'][0] for r in recs], [r['b'][1] for r in recs] if with_dists else None)
         flat_logits, flat_values = pair_distribution(subtree_selector, a, b, temperature, heuristic_bias_scale)
-        pair_log_probs = torch.log_softmax(flat_logits, dim=0)
-        pair_probs = torch.softmax(flat_logits, dim=0)
-        log_probs.append(pair_log_probs[record['flat_idx']])
-        entropies.append(-torch.sum(pair_probs * torch.log(pair_probs + 1e-10)))
+        idx = torch.tensor([[r['a_idx'] * b.feats.shape[1] + r['b_idx']] for r in recs], device=DEVICE)
+        pair_log_probs = torch.log_softmax(flat_logits, dim=1)
+        pair_probs = torch.softmax(flat_logits, dim=1)
+        log_probs.append(pair_log_probs.gather(1, idx).squeeze(1))
+        entropies.append(-torch.sum(pair_probs * torch.log(pair_probs + 1e-10), dim=1))
         if flat_values is not None:
-            values.append(flat_values[record['flat_idx']])
-    log_probs = torch.stack(log_probs)
+            values.append(flat_values.gather(1, idx).squeeze(1))
+        chunk_rewards.append(rewards[chunk])
+    log_probs, entropies, rewards = torch.cat(log_probs), torch.cat(entropies), torch.cat(chunk_rewards)
 
     if values:
-        values = torch.stack(values)
+        values = torch.cat(values)
         actor_loss = -torch.mean(log_probs * (rewards - values.detach()))
         critic_loss = critic_weight * torch.mean((rewards - values) ** 2)
     else:
         actor_loss = -torch.mean(log_probs * rewards)
         critic_loss = 0.0
-    total_loss = actor_loss + critic_loss + entropy_weight * -torch.mean(torch.stack(entropies))
+    total_loss = actor_loss + critic_loss + entropy_weight * -torch.mean(entropies)
 
     if torch.isfinite(total_loss):
         selector_optimizer.zero_grad()
