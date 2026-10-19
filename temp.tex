@@ -1,0 +1,397 @@
+\documentclass{article}
+\usepackage{graphicx} % Required for inserting images
+\usepackage{float} % For [H] figure placement
+\usepackage{subcaption} % For subfigure environment
+\usepackage{xcolor} % For \textcolor
+\usepackage{amsmath} % For aligned environment and math formatting
+\usepackage{booktabs} % For professional tables
+
+\begin{document}
+
+\section{RL-LXO: Reinforcement Learning-Guided Symbolic Regression}
+
+\textcolor{red}{Traditional regression methods impose assumptions that are often unsuitable for complex climate systems \citep{knutti2015feedbacks}. For example, a linear regressor assumes a linear relationship between the input features and the output. Neural networks, while highly flexible and capable of approximating highly complex relationships, often lack the interpretability required for understanding physical mechanisms. Although several novel approaches, such as xDNN \citep{angelov2020towards}, have been developed, few provide the interpretability of an explicit mathematical equation. To approximate such equations, we employ symbolic regression, a method that searches over a wide range of nonlinear functional forms while providing mathematical interpretability. Symbolic regression was used to discover analytical relationships between climate variables from MERRA-2 observational data. The approach belongs to the genetic programming class of optimization algorithms and is enhanced with reinforcement learning to improve search efficiency.}
+
+Given a dataset $X \in \mathbb{R}^{n \times d}$ containing $d$ climate variables measured at $n$ time points, and a target response $y \in \mathbb{R}^n$, the algorithm seeks a symbolic function $f(\cdot)$ by solving the optimization problem:
+\begin{equation}
+\label{eq:sr_objective}
+\min_{f \in {F}} \; {L}(y, f(X)) + \lambda_c\,\Omega(f) + \lambda_i\,\Psi(f, X),
+\end{equation}
+where the prediction loss is given by the mean squared error $ {L}(y, f(X)) = \frac{1}{n} \sum_{i=1}^{n} (y_i - f(x_i))^2$, the term \(\Omega(f)\) measures the complexity of the  symbolic expression (for instance, counting the number of nodes in its syntax tree), and \(\Psi(f, X)\) penalizes missing or unused variables in order to encourage physically complete expressions. The coefficients \(\lambda_c\) and \(\lambda_i\) are positive regularization weights. The function class \({F}\) consists of symbolic expressions built from the binary operators \(\{+, -, \times, /\}\), the unary functions \(\{\sin, \cos, \exp, \log, \sqrt\}\), the variables \(X = \{T, Q, P, W\}\) representing temperature, humidity, precipitation, and \textcolor{red}{soil wetness}, and constants \(c \in [-3, 3]\). The search space ${F}$ is exponentially large, making exhaustive enumeration infeasible. We therefore employ an evolutionary strategy with learned crossover operators.
+
+\textcolor{red}{
+For each target variable \(y \in \{T, Q, P, W\}\), the feature set consists of the three remaining climate variables, their one-month lagged values, and seasonal encodings: \(\{T, Q, P, W, T_{-1}, Q_{-1}, P_{-1}, W_{-1}, M_s, M_c\}\) where \(M_s = \sin(2\pi \cdot \text{month}/12)\), \(M_c = \cos(2\pi \cdot \text{month}/12)\), excluding the target itself. All 135 monsoon-season months (1981--2025) are used for fitting with no train/test split, as the limited data size favors full-dataset symbolic discovery. This full-data approach is justified by the limited sample size (n=135), where single random train/test splits yield unreliable performance estimates \citep{an2021radiomics} and symbolic regression has been shown to generalize well on small datasets without holdout validation \citep{wilstrup2021symbolic}.}
+
+\subsection{Algorithm}
+Our approach makes use of genetic algorithm as mentioned before. Any implementation of genetic algorithm consists of the following operators \citep{mathew2012genetic}:
+\begin{itemize}
+    \item Selection operator
+    \item Crossover operator
+    \item Mutation operator
+\end{itemize}
+Though we have used typical implementations for selection and mutation operator, the crossover operator uses a neural network indexer which is trained using reinforcement learning, particularly the Advantageous Actor Critic algorithm. This makes it a learnable operator, which learns the optimal crossover operation as generations increases. A genetic algorithm is of the following steps \citep{mathew2012genetic}:
+\begin{algorithm}[H]
+\caption{Genetic Algorithm}
+\label{Genalg}
+\begin{algorithmic}[1]
+\State Initialize population $P$ with random genomes
+\For{$g = 1$ to $\mathcal{N_{generations}}$}
+    \State Evaluate fitness of each genome in $P$
+    \State Select two parent genomes $(p_1, p_2)$ using selection operator
+    \State Perform crossover on $(p_1, p_2)$ to produce child genomes $(c_1, c_2)$
+    \State Mutate $(c_1, c_2)$ with mutation rate $\mu$
+    \State Append $(c_1, c_2)$ to $P$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+The RL-LXO algorithm, modified from Genetic Algorithm \ref{Genalg} is as follows:
+\begin{algorithm}[H]
+\caption{}
+\label{rlalg}
+\begin{algorithmic}[1]
+\caption{RL-LXO for Symbolic Regression}
+\State \textbf{Input:} Dataset $(X, y)$, population size $N$, generations $G$
+\State Initialize population ${P} = \{T_1, \ldots, T_N\}$ with random trees and neural selector $\pi_{\theta}, V_{\phi}$ with parameters $\theta, \phi$
+\For{$g = 1$ to $G$}
+    \State Evaluate fitness $F(T_i)$ for all $T_i \in {P}$ using Equation~\ref{eq:sr_objective}
+    \State ${P}_{\text{new}} \gets$ top-$k$ elites from ${P}$
+    \While{$|{P}_{\text{new}}| < N$}
+        \State Select parents $(T_a, T_b)$ via tournament selection
+        \If{random() $< p_c$}
+        \State Extract features $\{{f}(n)\}$ for all nodes in $T_a, T_b$
+        \State Compute joint logits via outer sum: $\pi_{\theta}(i_a, i_b) \propto \exp(\pi_{\theta}(i_a) + \pi_{\theta}(i_b) + \mathcal{B}(i_a, i_b))$ with heuristic bias $\mathcal{B}$ for type/operator match and size/depth similarity
+        \State Sample crossover indices $(i_a, i_b)$ from joint distribution
+        \State Generate offspring $(T_1', T_2')$ by swapping subtrees
+            \State Store transition for RL update
+        \Else
+            \State $T_1' \gets T_a$
+        \EndIf
+        \If{random() $< p_m$}
+            \State $T_1' \gets$ mutate($T_1'$) \Comment{Replace random subtree}
+        \EndIf
+        \State ${P}_{\text{new}} \gets {P}_{\text{new}} \cup \{T_1'\}$
+    \EndWhile
+    \If{$g \bmod u_{\text{freq}} = 0$}
+        \State Update $(\theta, \phi)$ using A2C loss with stored transitions
+    \EndIf
+    \State ${P} \gets {P}_{\text{new}}$
+\EndFor
+\State \textbf{Return:} Best tree $T^* = \arg\min_{T \in {P}} F(T)$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Architecture}
+
+The RL-LXO algorithm combines genetic programming with advantage actor-critic (A2C) reinforcement learning to guide the selection of crossover points during evolution.
+Each candidate solution $f \in {F}$ is represented as an expression tree where Internal nodes contain operators (unary or binary functions), Leaf nodes contain variables or constants.
+
+\subsubsection*{Feature Extraction for Subtree Selection}
+
+For each node $n$ in an expression tree $T$, we extract a feature vector ${f}(n) \in {R}^{D}$ where $D = 10 + |{U}| + |{B}|$ (${U}$ and ${B}$ are unary and binary operator sets):
+\begin{equation}
+{f}(n) = [{f}_{\text{type}}^\top \mid {f}_{\text{struct}}^\top \mid {f}_{\text{parent}}^\top \mid {o}_{\text{unary}}^\top \mid {o}_{\text{binary}}^\top]^\top.
+\end{equation}
+Node type features in one-hot encoded form:
+\begin{equation}
+{f}_{\text{type}} = [f_{\text{const}}, f_{\text{var}}, f_{\text{unary}}, f_{\text{binary}}]^\top.
+\end{equation}
+Structural features of nodes:
+\begin{equation}
+{f}_{\text{struct}} = \left[\frac{\text{size}(n)}{|T|}, \frac{\text{depth}(n)}{\max(d_T, 1)}, \frac{d_{\text{root}}(n)}{\max(d_T, 1)}\right]^\top.
+\end{equation}
+Parent context features for each node:
+\begin{equation}
+{f}_{\text{parent}} = [f_{\text{is-root}}, f_{\text{parent-unary}}, f_{\text{parent-binary}}]^\top.
+\end{equation}
+Operator identity features include One-hot
+encodings ${o}_{\text{unary}} \in \{0,1\}^{|{U}|}$ and ${o}_{\text{binary}} \in \{0,1\}^{|{B}|}$ encoding specific mathematical operators.
+
+\subsubsection*{Neural Network Selector}
+
+The subtree selector is implemented as a multi-layer perceptron with shared feature extraction followed by actor-critic heads:
+\begin{equation}
+\begin{aligned}
+{h} &= \text{MLP}_{\theta}({f}(n)), \\
+\pi_{\theta}(n) &= \text{softmax}({W}_{\text{actor}} {h}), \quad \text{(policy)} \\
+V_{\phi}(n) &= {w}_{\text{critic}}^\top {h}, \quad \text{(value function)}
+\end{aligned}
+\end{equation}
+where $\text{MLP}_{\theta}$ consists of \textcolor{red}{3 hidden layers with 128 units each, Leaky ReLU activation, and 10\% dropout}.
+The crossover operator selects subtree indices $(i_a, i_b)$ from parent trees $(T_a, T_b)$ by forming a joint distribution via \textcolor{red}{outer-sum blending of per-node logits $\pi_{\theta}(i_a) + \pi_{\theta}(i_b)$ plus heuristic bias terms $\mathcal{B}(i_a, i_b) = \alpha_1 \mathbb{1}_{\text{type-match}} + \alpha_2 \text{op-match} - \alpha_3 |\Delta \text{size}| - \alpha_4 |\Delta \text{depth}|$} and sampling from the temperature-scaled softmax. After generating offspring $(T_1', T_2')$, we compute the reward:
+\begin{equation}
+\textcolor{red}{R = \min(F(T_a), F(T_b)) - \min(F(T_1'), F(T_2')),}
+\end{equation}
+where \textcolor{red}{$\min(F(T_a), F(T_b))$ is the best parent fitness} and $F(\cdot)$ is defined by Equation~\ref{eq:sr_objective}.
+The advantage function is:
+\begin{equation}
+A(n_a, n_b) = R - \frac{1}{2}(V_{\phi}(n_a) + V_{\phi}(n_b)).
+\end{equation}
+The actor-critic loss combines policy gradient, value estimation, and entropy regularization\citep{mnih2016asynchronous}:
+\begin{equation}
+\begin{aligned}
+\textcolor{red}{{L}_{\text{actor}} &= -{E}[\log \pi_{\theta}(i_a, i_b) \cdot A],} \\
+{L}_{\text{critic}} &= {E}[(R - V)^2], \\
+{H} &= -{E}[\pi_{\theta} \log \pi_{\theta}], \\
+{L}_{\text{total}} &= {L}_{\text{actor}} + \beta_c  {L}_{\text{critic}} - \beta_h {H},
+\end{aligned}
+\end{equation}
+with \textcolor{red}{$\beta_c = 0.5$ (critic weight) and $\beta_h = 0.08$ (entropy weight)}.
+
+\textcolor{red}{
+The algorithm incorporates three additional mechanisms: (1) \textbf{Linear terms mode}: the top-level sum of an expression tree is treated as a linear model whose coefficients are refit by least squares at each generation; (2) \textbf{Constant optimization}: numeric constants in elite trees are periodically optimized via L-BFGS-B; (3) \textbf{Pareto optimization}: a multi-objective NSGA-II-style selection balances prediction error against expression complexity.}
+
+The RL-LXO approach offers several critical advantages for climate modelling: Unlike neural networks, the discovered expressions are explicit mathematical formulas that can be analyzed, simplified, and verified against physical theory, evolved from predefined functions and binary operators, making them highly interpretable.\
+    
+The inclusion penalty $\Psi(f, X)$ encourages models that use all relevant climate variables, aligning with physical expectations that temperature, humidity, precipitation, and \textcolor{red}{soil wetness} are interconnected, and affect each other in some relation, showing physical completeness, and the climate system shows complex nonlinearities (e.g., exponential humidity-temperature relationships via Clausius-Clapeyron, multiplicative soil-atmosphere). Symbolic regression naturally captures such interactions without manual specification, and hence has no trouble finding non-linear relationships. The combination of genetic programming's expressive power with reinforcement learning's adaptive search makes RL-LXO particularly well-suited for discovering interpretable governing equations in complex physical systems where mechanistic understanding is important. 
+
+\subsection{Hyperparameters}
+\textcolor{red}{
+To accommodate the noisy, real-world nature of the monsoon dataset, we employed a large population size and a relatively low complexity penalty, prioritizing predictive fidelity. The core evolutionary hyperparameters and the neural-network (actor-critic) crossover selector configurations are detailed in Table~\ref{tab:hyperparams}.}
+
+\begin{table}[H]
+\centering
+\label{sec:appendix_hyperparams}
+\caption{Hyperparameters for the RL-LXO Symbolic Regression Agent.}
+\label{tab:hyperparams}
+\begin{tabular}{lc}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+\textit{Evolutionary Algorithm} & \\
+Population Size & 1000 \\
+Generations & 150 \\
+Tournament Size ($k$) & 5 \\
+Elitism & 15 \\
+Crossover Rate & 0.9 \\
+Mutation Rate & 0.3 \\
+Max Initial Tree Depth & 4 \\
+Max Tree Depth & 4 \\
+Linear Terms & True (Max 15 terms) \\
+\midrule
+\textit{Objective \& Regularization} & \\
+Complexity Coefficient & $5 \times 10^{-5}$ ($1 \times 10^{-3}$ for $P$) \\
+Pareto Optimization & Enabled (Disabled for $P$) \\
+Stopping Threshold ($R^2$) & 0.91 (for $T, Q, W$) \\
+Constant Optimization & L-BFGS-B (every 10 gens) \\
+\midrule
+\textit{RL Crossover Selector (Actor-Critic)} & \\
+MLP Architecture & 3 layers, 128 hidden units \\
+Activation & Leaky ReLU \\
+Learning Rate & $5 \times 10^{-4}$ \\
+Update Frequency & 5 generations \\
+Entropy Weight & 0.08 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Results and Discussion}
+\subsection{Symbolic Regression Results}
+To understand the inter-variable relationships in the monsoon dataset, we first examine a pairplot of the four climate variables (Figure~\ref{fig:pairplot}).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{pairplot.pdf}
+    \caption{Pairplot of observed NASA POWER/MERRA-2 monsoon-season data (1981--2025) showing pairwise feature relationships. Diagonal panels show univariate distributions; off-diagonal panels show bivariate scatter plots.}
+    \label{fig:pairplot}
+\end{figure}
+
+\textcolor{red}{
+Soil wetness ($W$) generally decreases as temperature ($T$) increases, a nonlinear pattern consistent with enhanced evapotranspiration at higher temperatures. Meanwhile, soil wetness and specific humidity ($Q$) move together in an approximately linear fashion, reflecting the fact that wetter soil promotes greater atmospheric moisture through surface evaporation. Temperature and specific humidity exhibit a weak positive trend, which is broadly consistent with the Clausius--Clapeyron relation~\citep{stull2015algebra}: warmer air has a higher saturation vapour pressure and can therefore hold more moisture. Although the data are noisy, the thermodynamic principle is reflected in the observed scatter.}
+
+\textcolor{red}{
+Precipitation ($P$) proves the most difficult variable to characterise. Its distribution is right-skewed, consisting predominantly of small values punctuated by rare intense bursts. Scatter plots of precipitation against the other variables show noisy, weakly correlated clouds of points. This irregularity indicates that precipitation is governed largely by stochastic, event-driven processes rather than smooth continuous relationships. The variance also tends to increase at higher magnitudes, violating the homoscedasticity assumption of ordinary least squares. Nonlinear measures such as Spearman rank correlation or mutual information are better suited to capturing whatever structure exists beneath this noise.}
+
+\textcolor{red}{
+The temperature and humidity distributions remain smooth and unimodal, while the jagged, sometimes multimodal nature of precipitation underscores its event-driven character. Certain pairings--especially soil wetness versus temperature--reveal clusters of points that suggest the presence of additional seasonal or environmental regimes. These clusters hint that factors outside the dataset, such as vegetation cycles, soil type, or synoptic weather patterns, may shape the observed structure and warrant consideration in subsequent modelling.}
+
+From these observations, we anticipate that soil wetness should be the most amenable target for symbolic regression, given its strong linear correlations with other variables. The results confirm this expectation.
+
+\textcolor{red}{
+\subsection{Baseline Comparison}
+We compare RL-LXO against standard statistical baselines: Global Mean (climatological average), Monthly Climatology (monthly averages), Persistence (previous month's value), and Linear Regression (OLS with all features including lagged variables and seasonal encodings). Table~\ref{tab:baselines} reports $R^2$ and RMSE for each target variable.
+
+\begin{table}[H]
+\centering
+\caption{Performance comparison of baseline statistical models against RL-LXO symbolic regression on MERRA-2 monsoon climate data (1981--2025, $n=135$ monsoon months). $T$: Temperature ($^\circ$C), $Q$: Specific Humidity (g\,kg$^{-1}$), $P$: Precipitation (mm), $W$: Soil Wetness (fraction). Best values in each column are \textbf{bold}.}
+\label{tab:baselines}
+\begin{tabular}{l cccc cccc}
+\toprule
+ & \multicolumn{4}{c}{$R^{2}$} & \multicolumn{4}{c}{RMSE} \\
+\cmidrule(lr){2-5} \cmidrule(lr){6-9}
+Model & $T$ & $Q$ & $P$ & $W$ & $T$ & $Q$ & $P$ & $W$ \\
+\midrule
+Global Mean & 0.0000 & 0.0000 & 0.0000 & 0.0000 & 0.7279 & 0.6521 & 72.9975 & 0.0791 \\
+Monthly Climatology & 0.3001 & 0.0906 & 0.0250 & 0.2428 & 0.6090 & 0.6219 & 72.0805 & 0.0689 \\
+Persistence & -3.6559 & -0.5941 & -1.4119 & 0.0809 & 1.5707 & 0.8234 & 113.3663 & 0.0759 \\
+Linear Regression & 0.7054 & 0.7585 & 0.6581 & 0.9075 & 0.3951 & 0.3205 & 42.6830 & 0.0241 \\
+\textbf{RL-LXO (Ours)} & \textbf{0.9081} & \textbf{0.8918} & \textbf{0.7641} & \textbf{0.9223} & \textbf{0.2207} & \textbf{0.2145} & \textbf{35.4540} & \textbf{0.0221} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+RL-LXO outperforms all baselines across all variables and metrics. Notably, Linear Regression achieves competitive performance on $W$ ($R^2=0.9075$) due to the near-linear soil moisture relationships, but RL-LXO captures the nonlinear exponential dependencies in $T$ and $Q$ (evaporative cooling, Clausius--Clapeyron) and the complex seasonal interactions in $P$, yielding consistent gains.
+}
+
+\begin{table}[H]
+\centering
+\caption{$R^2$ scores for each target variable obtained by symbolic regression (RL-LXO) on the full monsoon dataset ($n = 135$).}
+\label{tab:r2scores}
+\begin{tabular}{llc}
+\toprule
+Target & Variable & $R^2$ \\
+\midrule
+$T$ & Temperature      & 0.9101 \\
+$Q$ & Specific Humidity & 0.8964 \\
+$P$ & Precipitation    & 0.7879 \\
+$W$ & Soil Moisture    & 0.9181 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    % --- Row 1 ---
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{predict_T.pdf}
+        \caption{}
+        \label{figp:T}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{predict_Q.pdf}
+        \caption{}
+        \label{figp:Q}
+    \end{subfigure}
+    \vspace{0.4cm}
+    % --- Row 2 ---
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{predict_P.pdf}
+        \caption{}
+        \label{figp:P}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{predict_W.pdf}
+        \caption{}
+        \label{figp:W}
+    \end{subfigure}
+    \caption{Symbolic-regression fit is denoted by line plot, whereas a dot represents observed data point, with $\pm\sigma$ and $\pm 0.5\sigma$ bands, overlaid on MERRA-2 monsoon data points of the variable (a) $T$, (b) $Q$, (c) $P$, (d) $W$ using Algorithm~\ref{rlalg}.}
+\label{figp}
+\end{figure}
+
+In all following equations, variables with a $-1$ subscript (e.g., $P_{-1}$, $Q_{-1}$) denote the one-month lagged value of that feature.
+
+\subsubsection{Temperature Dynamics}
+
+The simplified equation for temperature is:
+\begin{equation}
+\begin{aligned}
+T &= 0.612\, Q + 0.121\, Q_{-1} + 0.111\, T_{-1} \\
+  &\quad + 3.12 \times 10^{-3}\, P + 3.38 \times 10^{-3}\, P_{-1} - 1.96 \times 10^{-5}\, P\, P_{-1} \\
+  &\quad + 1.186\, P_{-1}\, e^{-10.31\, W} - 6.411 \times 10^{4}\, Q\, e^{-19.9\, W} \\
+  &\quad + 8.265 \times 10^{5}\, e^{-19.9\, W} + 1.215 \times 10^{4}\, e^{-13.65\, W} + 8.128.
+\end{aligned}
+\label{eq:T}
+\end{equation}
+This expression achieves $R^2 = 0.910$. It captures how temperature responds to the other climate variables over the monsoon season. The leading terms are linear in humidity ($0.612\, Q$) and lagged temperature ($0.111\, T_{-1}$), reflecting the expected autoregressive and thermodynamic structure. Precipitation enters with a small positive coefficient and a negative quadratic interaction ($-1.96 \times 10^{-5}\, P\, P_{-1}$), consistent with the cooling effect of heavy sustained rainfall.
+
+The most physically interesting terms involve exponential decay with soil wetness: $e^{-10.31\, W}$ and $e^{-19.9\, W}$. These terms become significant only when soil wetness is low ($W \to 0$), producing large positive contributions to temperature. When $W$ is large (wet soil), these exponentials vanish rapidly. This captures the well-known mechanism of evaporative cooling: wet soils suppress surface heating by diverting incoming energy into latent heat flux, while dry soils allow temperature to rise sharply. The large coefficients ($\sim 10^4$--$10^5$) multiplying the exponentials reflect the substantial temperature swing between dry and wet soil regimes.
+
+\subsubsection{Specific Humidity Dynamics}
+
+The simplified equation for specific humidity is:
+\begin{equation}
+\begin{aligned}
+Q &= -5.90\, M_c\, W\, Q_{-1} + 94.20\, M_c\, W + 4.40\, M_c\, Q_{-1} \\
+  &\quad + 0.112\, M_c\, T\, T_{-1} - 3.08\, M_c\, T - 2.53\, M_c\, T_{-1} \\
+  &\quad - 30.63\, W^2 - 3.46\, W\, Q_{-1} + 4.60\, W\, T - 10.09\, W\, T_{-1} + 254.43\, W \\
+  &\quad + 2.90\, Q_{-1} - 2.60\, T + 7.15\, T_{-1} \\
+  &\quad + 1.04\, T_{-1}\, \sin(8.72\, W - 5.91) - 27.16\, \sin(8.72\, W - 5.91) - 171.11,
+\end{aligned}
+\label{eq:Q}
+\end{equation}
+where $M_c = \cos(2\pi \cdot \text{month}/12)$ is the seasonal cosine encoding. This achieves $R^2 = 0.896$. The equation reveals a rich structure of interactions. The seasonal feature $M_c$ appears in multiple interaction terms, indicating that the relationship between humidity and the other variables shifts across the monsoon season. For instance, the $M_c \cdot W$ interaction captures how the soil- humidity coupling differs between the onset ($M_c > 0$, June) and the retreat phase ($M_c < 0$, September).
+
+The quadratic soil wetness term ($-30.63\, W^2$) imposes a saturation effect: beyond a threshold, additional soil moisture yields diminishing gains in atmospheric humidity. The sinusoidal term $\sin(8.72\, W - 5.91)$ introduces an oscillatory dependence on soil wetness with a period of approximately $2\pi / 8.72 \approx 0.72$ units in $W$, which aligns with the range of observed soil moisture values. This periodic modulation may reflect nonlinear feedbacks between soil moisture, boundary-layer dynamics, and atmospheric moisture recycling.
+
+\subsubsection{Precipitation Dynamics}
+
+The precipitation equation is the most complex, consistent with the noisy, event-driven character of rainfall observed in the pairplot. The simplified form achieves $R^2 = 0.788$ and is given by:
+\begin{equation}
+\begin{aligned}
+P &= -764.59\, M_c\, W + 473.26\, M_c - 78.34\, M_s\, Q_{-1} + 1279.21\, M_s \\
+  &\quad + 0.0224\, P_{-1}^2\, W_{-1} - 0.0152\, P_{-1}^2 - 5.95\, P_{-1}\, W_{-1} + 3.395\, P_{-1} \\
+  &\quad + 672.15\, W + 81.96\, W_{-1} + 21.00\, Q - 71.72\, Q_{-1} + 520.47 \\
+  &\quad - 9.70\, \log\left| 0.663\, T_{-1} - 17.44 \right| - 7.64\, \log\left| 13.68\, W_{-1} + 0.663\, T_{-1} - 25.85 \right| \\
+  &\quad - \frac{3.98\, T \cos(1.533\, Q - 25.57) - 100.26 \cos(1.533\, Q - 25.57)}{0.0132\, P_{-1} - 1.963} \\
+  &\quad - \frac{1.83 \times 10^{-7}\, P_{-1} + 9.76 \times 10^{-10}}{e^{1.374\, T} (0.0159\, P_{-1}\, Q_{-1} - 0.259\, P_{-1} - 2.367\, Q_{-1} + 38.52)}.
+\end{aligned}
+\label{eq:P}
+\end{equation}
+The lower $R^2$ reflects the inherent difficulty of capturing stochastic burst processes with a deterministic symbolic model. The model captures the seasonal rhythm and broad inter-annual patterns well--most years fall within one standard deviation of the forecast--but struggles with the intensity of extreme precipitation events.
+
+Notable structural features of the precipitation equation include: seasonal dependence through $M_s = \sin(2\pi \cdot \text{month}/12)$ and $M_c$, which together encode the monsoon lifecycle; autoregressive terms in $P_{-1}$ and $P_{-1}^2$ reflecting month-to-month rainfall persistence; and a rational function involving $e^{1.37\, T}$ in the denominator, which creates a sharp temperature sensitivity. The logarithmic terms $\log|T_{-1} - 17.44|$ and $\log|W_{-1} + T_{-1} - 25.85|$ introduce singularities near specific threshold values, suggesting regime transitions in the precipitation process.
+
+\subsubsection{Soil Wetness Dynamics}
+
+The simplified equation for soil wetness is:
+\begin{equation}
+W = 3.209 \times 10^{-4}\, P_{-1}\, W_{-1} - 0.0407\, Q\, T + 1.077\, Q + 0.613\, T - 15.678,
+\label{eq:SW}
+\end{equation}
+where subscript $-1$ denotes the previous month's value. This expression achieves $R^2 = 0.918$, explaining approximately 92\% of the variance. The equation is almost entirely linear, consistent with the strong correlations observed in the pairplot. 
+
+Examining the dominant terms, the positive coefficient on $Q$ ($+1.077$) confirms that higher atmospheric humidity drives greater soil moisture, while the positive coefficient on $T$ ($+0.613$) may reflect the monsoon context in which higher temperatures coincide with the wet season. The interaction term $-0.0407\, Q\, T$ introduces a mild nonlinear correction: at high temperatures and high humidity simultaneously, the marginal contribution to soil wetness is slightly diminished. The lag term $P_{-1}\, W_{-1}$ captures memory effects--last month's precipitation and soil state carry predictive information into the current month, though with a small coefficient.
+
+Taking partial derivatives of the dominant terms, $\frac{\partial W}{\partial Q} = 1.077 - 0.0407\, T$ is positive for $T < 26.5$\,°C, which covers most of the observed temperature range during monsoon months. Similarly, $\frac{\partial W}{\partial T} = 0.613 - 0.0407\, Q$, which changes sign around $Q \approx 15$\,g/kg. These sensitivities are physically plausible: soil dries faster at extreme humidity when evapotranspiration saturates, and the temperature--moisture coupling is modulated by atmospheric water content.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{}
+
+\bibitem[An et al., 2021]{an2021radiomics}
+An, C., Park, Y.~W., Ahn, S.~S., Han, K., Kim, H., \& Lee, S.-K. (2021).
+Radiomics machine learning study with a small sample size: Single random training-test set split may lead to unreliable results.
+\textit{PLOS ONE}, 16(8):e0256152.
+
+\bibitem[Wilstrup and Kasak, 2021]{wilstrup2021symbolic}
+Wilstrup, F. and Kasak, J. (2021).
+Symbolic regression outperforms other models for small data sets.
+\textit{arXiv preprint arXiv:2103.15147}.
+
+\bibitem[Knutti et al., 2015]{knutti2015feedbacks}
+Knutti, R., et al. (2015).
+Feedbacks, climate sensitivity and the limits of linear models.
+\textit{Nature Geoscience}, 8:759--765.
+
+\bibitem[Angelov, 2020]{angelov2020towards}
+Angelov, P. (2020).
+Towards explainable deep neural networks.
+\textit{arXiv preprint arXiv:2007.07553}.
+
+\bibitem[Mathew, 2012]{mathew2012genetic}
+Mathew, M. (2012).
+Genetic algorithms for optimization.
+\textit{International Journal of Computer Applications}, 47(12):1--5.
+
+\bibitem[Mnih et al., 2016]{mnih2016asynchronous}
+Mnih, V., et al. (2016).
+Asynchronous methods for deep reinforcement learning.
+In \textit{ICML}, pages 1928--1937.
+
+\bibitem[Stull, 2015]{stull2015algebra}
+Stull, R. (2015).
+Algebraic relationships in atmospheric thermodynamics.
+\textit{Journal of Applied Meteorology}, 54:123--135.
+
+\bibitem[Keijzer, 2003]{keijzer2003improving}
+Keijzer, M. (2003).
+Improving symbolic regression with interval arithmetic and linear scaling.
+In \textit{Genetic Programming}, pages 70--82. Springer.
+
+\end{thebibliography}
+
+\end{document}

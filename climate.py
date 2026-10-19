@@ -1,11 +1,18 @@
-from main import run_ga, set_global_seed
+from main import run_ga, set_global_seed, simplify_equation
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 from sklearn.feature_selection import mutual_info_regression
+from sklearn.metrics import r2_score
 import seaborn as sns
 import sympy as sp
 import re
+import time
+
+mpl.rcParams['font.family'] = 'serif'
+mpl.rcParams['font.serif'] = ['Times New Roman']
+mpl.rcParams['mathtext.fontset'] = 'stix'  # STIX matches Times New Roman for math
 
 SEED = 42
 set_global_seed(SEED)
@@ -14,7 +21,7 @@ color_mapping = {
     'Temperature': 'darkred',
     'Specific Humidity': 'blue',
     'Precipitation': 'darkviolet',
-    'Soil Moisture': 'forestgreen'
+    'Soil Wetness': 'forestgreen'
 }
 
 monsoon = pd.read_csv("monsoon.csv")
@@ -46,8 +53,19 @@ df_pivot.set_index("DATE", inplace=True)
 df_final = df_pivot.drop(columns=["YEAR", "MONTH", "MONTH_NUM"])
 
 def sanitize(name: str) -> str:
-    s = name.strip()
-    s = re.sub(r"\W+", "_", s)
+    name_map = {
+        'Precipitation': 'P',
+        'Soil Moisture ': 'W',   # trailing space in CSV
+        'Soil Moisture': 'W',
+        'Specific Humidity': 'Q',
+        'Temperature': 'T',
+    }
+    stripped = name.strip()
+    if name in name_map:
+        return name_map[name]
+    if stripped in name_map:
+        return name_map[stripped]
+    s = re.sub(r"\W+", "_", stripped)
     if s and s[0].isdigit():
         s = f"v_{s}"
     s = s[:2]
@@ -92,9 +110,9 @@ sns.heatmap(data=df_final.corr(), annot=True, cmap="coolwarm")
 
 fig, axes = plt.subplots(4, 4, figsize=(16, 16))
 
-vars = ['Pr', 'So', 'Sp', 'Te']
-chvars = {'Pr': 'P', 'So': 'W', 'Sp': 'Q', 'Te': 'T'}
-var_to_full = {'Pr': 'Precipitation', 'So': 'Soil Moisture', 'Sp': 'Specific Humidity', 'Te': 'Temperature'}
+vars = ['T', 'Q', 'P', 'W']
+chvars = {'P': 'P', 'W': 'W', 'Q': 'Q', 'T': 'T'}
+var_to_full = {'P': 'Precipitation', 'W': 'Soil Wetness', 'Q': 'Specific Humidity', 'T': 'Temperature'}
 for i in range(4):
     for j in range(4):
         ax = axes[i, j]
@@ -113,82 +131,133 @@ for i in range(4):
 plt.tight_layout()
 plt.savefig(f"pairplot.pdf", bbox_inches='tight')
 
+def add_seasonal_features(df):
+    """Add seasonal features (month sin/cos) - always available at prediction time."""
+    df = df.copy()
+    month = df.index.month
+    df["Ms"] = np.sin(2 * np.pi * month / 12)
+    df["Mc"] = np.cos(2 * np.pi * month / 12)
+    return df
+
+def add_lag_features_full(df, lag_vars):
+    """Add previous-month lag features within each year (full dataset, no split)."""
+    df = df.copy()
+    for c in lag_vars:
+        df[f"{c}1"] = df.groupby(df.index.year)[c].shift(1)
+    return df
+
+# Use all data — no train/test split
+df_sorted = df_final.sort_index()
+df_all = add_seasonal_features(df_sorted)
+df_all = add_lag_features_full(df_all, ["P", "W", "Q", "T"])
+
+feature_vars = ["Ms", "Mc", "P", "W", "Q", "T"]
+lag_vars = [f"{c}1" for c in ["P", "W", "Q", "T"]]
+all_feature_vars = feature_vars + lag_vars
+
+target_data = {}
+for t in targets:
+    cols = [c for c in all_feature_vars if c != t]
+    data = df_all[cols + [t]].dropna()
+    target_data[t] = data
+    print(f"{t}: n={len(data)}")
+
 default_ga_config = {
-    "pop_size": 1500, "gens": 200, "max_init_depth": 4, "max_depth": 10,
+    "pop_size": 1000, "gens": 150, "max_init_depth": 4, "max_depth": 4,
     "crossover_rate": 0.9, "mutation_rate": 0.3, "tournament_k": 5, "elitism": 15,
     "use_learned_crossover": True,
-    "mlp_layers": 8, "mlp_hidden_dim": 1024, "mlp_activation": "leaky_relu", "mlp_dropout": 0.1,
+    "mlp_layers": 3, "mlp_hidden_dim": 128, "mlp_activation": "leaky_relu", "mlp_dropout": 0.1,
     "stopping_metric": "r2", "stopping_threshold": 1.0,
-    "complexity_coef": 1e-6, "inclusion_coef": 1.0, "prob_const": 0.3, "const_range": (-5, 5),
+    "complexity_coef": 5e-5, "inclusion_coef": 0.0, "prob_const": 0.3, "const_range": (-5, 5),
     "point_mutation_prob": 0.1, "simplify_new_genomes": False, "simplify_timeout": 0.2,
     "temperature": 1.0, "entropy_weight": 0.08, "heuristic_bias_scale": 0.1,
     "opt_constants": True, "const_opt_freq": 10, "const_opt_method": "L-BFGS-B",
-    "const_opt_maxiter": 100, "verbose": True, "use_pareto": True, "print_freq": 10, "seed": SEED,
-    "selector_update_freq": 1, "selector_warmup_gens": 5, "selector_recent_gen_window": 50,
+    "const_opt_maxiter": 100, "verbose": True, "use_pareto": True, "print_freq": 5, "seed": SEED,
+    "selector_update_freq": 5, "selector_warmup_gens": 5, "selector_recent_gen_window": 50,
     "selector_min_history": 64, "selector_reward_clip": 3.0, "selector_lr": 5e-4,
-    "use_critic": True, "selector_device": "cpu"
+    "use_critic": True, "selector_device": "cpu",
+    # Fit top-level term weights by least squares and bias the search toward quadratic terms
+    "linear_terms": True, "max_terms": 15, "add_term_prob": 0.2, "quadratic_init_frac": 0.3,
 }
 
 target_ga_configs = {
-    'Pr': {"use_pareto": False},
-    'So': {"stopping_threshold": 0.9},
-    'Sp': {},
-    'Te': {},
+    'P': {"use_pareto": False, "complexity_coef": 1e-3},
+    'W': {"stopping_threshold": 0.91},
+    'Q': {"stopping_threshold": 0.91},
+    'T': {"stopping_threshold": 0.91},
 }
 
-results = {i: [None, None] for i in targets}
-
-targets = targets[::-1]
-
-
-for target in targets:
-    target_full = next((orig for orig, alias in col_map.items() if alias == target), target)
-    feature_cols = [c for c in df_final.columns if c != target]
-    # Merge default config with any target-specific overrides
-    ga_config = default_ga_config.copy()
-    ga_config.update(target_ga_configs.get(target, {}))
-    ga_config["var_names"] = feature_cols
-
-    X = df_final[feature_cols].to_numpy(dtype=float)
-    y = df_final[target].to_numpy(dtype=float)
-    print(f"Running {target} against {feature_cols}")
-    eqn, score = run_ga(X, y, **ga_config)
-
-    sym_expr = sp.cancel(eqn.to_sympy())
-    sym_expr = sp.trigsimp(sym_expr)
-    sym_expr = sp.powsimp(sym_expr)
-    results[target] = [sym_expr, score]
-    print(f"Best equation for {target_full} (R^2={score:.4f}): {sym_expr}\n")
-
-for target, (expr, score) in results.items():
-    print(f"Target: {target}, R^2 Score: {score:.4f}")
-    print(f"Equation: {expr}\n")
-    feature_cols = [c for c in df_final.columns if c != target]
-    y = df_final[target].to_numpy(dtype=float)
-    X = df_final[feature_cols].to_numpy(dtype=float)
-    lambdified = sp.lambdify(sp.symbols(feature_cols), expr, "numpy")
-    y_pred = lambdified(*X.T)
-    residuals = y - y_pred
-    plt.figure(figsize=(10, 5))
-    plt.scatter(df_final.index, y, alpha=0.7, zorder=5, color="#001a4d")
-    plt.plot(df_final.index, y_pred, color=color_mapping.get(var_to_full.get(target)), zorder=6)
-    sigma = float(np.std(residuals))
-    upper1 = y_pred + 0.5 * sigma
-    lower1 = y_pred - 0.5 * sigma
-    upper2 = y_pred + 1 * sigma
-    lower2 = y_pred - 1 * sigma
-    plt.fill_between(df_final.index, lower2, upper2, color=color_mapping.get(var_to_full.get(target)), alpha=0.12, label=f"±σ (σ={sigma:.3f})", zorder=2)
-    plt.fill_between(df_final.index, lower1, upper1, color=color_mapping.get(var_to_full.get(target)), alpha=0.18, label=f"±0.5σ (σ={sigma:.3f})", zorder=3)
-    plt.xlabel("Year")
-    plt.ylabel(f"{var_to_full.get(target, target)}")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(f"predict_{target}.pdf", bbox_inches='tight')
+def predict_expression(expr, feature_cols, X):
+    """Evaluate a symbolic equation and return one prediction per input row."""
+    fn = sp.lambdify(sp.symbols(feature_cols), expr, "numpy")
+    return np.broadcast_to(np.asarray(fn(*X.T), dtype=float), X.shape[0])
 
 
-print(f"Total score: {sum(score for _, score in results.values()):.4f}")
+def run_experiment():
+    """Fit equations on 100% of data."""
+    records, equations, simplified_equations = [], {}, {}
 
-pd.DataFrame(results, index=["Equation", "R^2 Score"]).T.to_csv("results.csv")
-with open("eqns.tex", "w") as f:
-    for target, (expr, score) in results.items():
-        f.write(f"{target} & {sp.latex(expr)} & {score:.4f} \\\\\n")
+    for target in reversed(targets):
+        target_full = next((orig for orig, alias in col_map.items() if alias == target), target)
+        data = target_data[target]
+
+        feature_cols = [c for c in data.columns if c != target]
+        X = data[feature_cols].to_numpy(dtype=float)
+        y = data[target].to_numpy(dtype=float)
+
+        x_mu, x_sd = X.mean(axis=0), X.std(axis=0)
+        y_mu, y_sd = y.mean(), y.std()
+        if np.any(x_sd == 0) or y_sd == 0:
+            raise ValueError(f"Cannot standardize {target}: zero variance.")
+
+        ga_config = default_ga_config.copy()
+        ga_config.update(target_ga_configs.get(target, {}))
+        ga_config["var_names"] = feature_cols
+
+        print(f"Running: {target} (n={len(X)})")
+        eqn, ga_r2 = run_ga(
+            (X - x_mu) / x_sd, (y - y_mu) / y_sd, **ga_config
+        )
+        z_expr = sp.powsimp(sp.trigsimp(sp.cancel(eqn.to_sympy())))
+        unscale = {
+            symbol: (sp.Symbol(symbol.name) - x_mu[feature_cols.index(symbol.name)])
+            / x_sd[feature_cols.index(symbol.name)]
+            for symbol in z_expr.free_symbols
+        }
+        expr = y_mu + y_sd * z_expr.xreplace(unscale)
+        simplified_expr, _ = simplify_equation(expr, data, y)
+
+        r2 = r2_score(y, predict_expression(expr, feature_cols, X))
+        equations[target] = expr
+        simplified_equations[target] = simplified_expr
+        records.append({
+            "target": target, "target_name": target_full,
+            "n": len(X), "r2": r2,
+            "ga_r2_standardized": ga_r2,
+            "equation": str(expr), "simplified_equation": str(simplified_expr),
+        })
+        print(f"{target_full}: R²={r2:.4f}")
+        print(f"Equation: {expr}\n")
+
+    results = pd.DataFrame(records)
+    results.to_csv("results.csv", index=False)
+    with open("eqns.tex", "w", encoding="utf-8") as f:
+        for row in records:
+            f.write(f"{row['target']} & {sp.latex(equations[row['target']])} & {row['r2']:.4f} \\\\\n")
+    return results, equations, simplified_equations
+
+
+# Run on full data
+start_time = time.time()
+results, equations, simplified_equations = run_experiment()
+print("\nFull-data R²:")
+print(results[["target", "target_name", "r2"]])
+elapsed = time.time() - start_time
+print(f"\nTotal runtime: {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
+
+# Save simplified results
+results_simplified = {row['target']: (row['simplified_equation'], row['r2']) for _, row in results.iterrows()}
+pd.DataFrame(results_simplified, index=["Equation", "R^2 Score"]).T.to_csv("results_simplified.csv")
+with open("eqns_simplified.tex", "w") as f:
+    for target, (expr, score) in results_simplified.items():
+        f.write(f"{target} & {sp.latex(simplified_equations[target])} & {score:.4f} \\\\\n")

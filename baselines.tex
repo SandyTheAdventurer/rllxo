@@ -1,0 +1,18 @@
+\begin{table}[H]
+\centering
+\caption{Performance comparison of baseline statistical models against RL-LXO symbolic regression on MERRA-2 monsoon climate data (1981--2025, $n=135$ monsoon months). $T$: Temperature ($^\circ$C), $Q$: Specific Humidity (g\,kg$^{-1}$), $P$: Precipitation (mm), $W$: Soil Wetness (fraction). Best values in each column are \textbf{bold}.}
+\label{tab:baselines}
+\begin{tabular}{l cccc cccc}
+\toprule
+ & \multicolumn{4}{c}{$R^{2}$} & \multicolumn{4}{c}{RMSE} \\
+\cmidrule(lr){2-5} \cmidrule(lr){6-9}
+Model & $T$ & $Q$ & $P$ & $W$ & $T$ & $Q$ & $P$ & $W$ \\
+\midrule
+Global Mean & 0.0000 & 0.0000 & 0.0000 & 0.0000 & 0.7279 & 0.6521 & 72.9975 & 0.0791 \\
+Monthly Climatology & 0.3001 & 0.0906 & 0.0250 & 0.2428 & 0.6090 & 0.6219 & 72.0805 & 0.0689 \\
+Persistence & -3.6559 & -0.5941 & -1.4119 & 0.0809 & 1.5707 & 0.8234 & 113.3663 & 0.0759 \\
+Linear Regression & 0.7054 & 0.7585 & 0.6581 & 0.9075 & 0.3951 & 0.3205 & 42.6830 & 0.0241 \\
+\textbf{RL-LXO (Ours)} & \textbf{0.9081} & \textbf{0.8918} & \textbf{0.7641} & \textbf{0.9223} & \textbf{0.2207} & \textbf{0.2145} & \textbf{35.4540} & \textbf{0.0221} \\
+\bottomrule
+\end{tabular}
+\end{table}

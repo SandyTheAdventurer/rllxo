@@ -1,6 +1,7 @@
 # Genetic algorithm for symbolic regression (simple, self-contained)
 
 import random
+import collections
 import copy
 import operator
 import time
@@ -121,7 +122,7 @@ DEFAULT_SYMPY_UNARY = {
     'sin': sp.sin,
     'cos': sp.cos,
     'exp': sp.exp,
-    'log': sp.log,
+    'log': lambda a: sp.log(sp.Abs(a)),  # match plog, which takes log(|x|)
 }
 
 def _sympy_safe_div(a, b):
@@ -387,17 +388,20 @@ def pareto_objectives(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray
                       inclusion_coef=1.0) -> Tuple[float, float]:
     """Return (error_with_inclusion, complexity) objectives for Pareto sorting."""
     try:
-        y_pred = ind.evaluate(inputs)
+        y_pred = predict(ind, inputs, y)
         if np.any(np.isinf(y_pred)) or np.any(np.isnan(y_pred)):
             return 1e6 + ind.size(), float(ind.size())
         mse = float(np.mean((y - y_pred) ** 2))
     except Exception:
         return 1e6 + ind.size(), float(ind.size())
-    used_vars = gather_used_var_names(ind)
-    missing_vars = set(inputs.keys()) - used_vars
-    inert_vars = detect_inert_variables(ind, inputs, y_pred, candidate_vars=used_vars)
-    missing_vars |= inert_vars
-    inclusion_penalty = inclusion_coef * len(missing_vars)
+    inclusion_penalty = 0.0
+    if inclusion_coef:
+        used_vars = gather_used_var_names(ind)
+        missing_vars = set(inputs.keys()) - used_vars
+        # Compare raw tree outputs: in linear-terms mode y_pred is the refitted prediction
+        base_pred = ind.evaluate(inputs) if LINEAR_TERMS else y_pred
+        missing_vars |= detect_inert_variables(ind, inputs, base_pred, candidate_vars=used_vars)
+        inclusion_penalty = inclusion_coef * len(missing_vars)
     return mse + inclusion_penalty, float(ind.size())
 
 
@@ -753,6 +757,12 @@ def run_ga(
     allow_pow=False,
     selector_device="auto",
     heuristic_bias_scale=1.0,
+    linear_terms=False,
+    max_terms=20,
+    add_term_prob=0.0,
+    quadratic_init_frac=0.0,
+    var_dimensions=None,
+    target_dimension=None,
 ):
     global subtree_selector, selector_optimizer, crossover_history, selector_feature_dim
     
@@ -796,6 +806,11 @@ def run_ga(
         SYMPY_BINARY["pow"] = lambda a, b: a ** b
     ALL_BINARY = list(BINARY_FUNCS.keys())
 
+    global LINEAR_TERMS, MAX_TERMS
+    LINEAR_TERMS = bool(linear_terms)
+    MAX_TERMS = int(max_terms)
+    set_dimensions(var_dimensions, target_dimension)
+
     # Reset crossover history whenever we start a new GA run so feature sizes stay consistent
     crossover_history = []
     selector_feature_dim = get_selector_feature_dim()
@@ -809,6 +824,9 @@ def run_ga(
         )
         for _ in range(pop_size)
     ]
+    n_quad = int(quadratic_init_frac * pop_size)
+    for i in range(n_quad):
+        pop[i] = random_quadratic(random.randint(2, max(2, max_terms // 2)))
     if simplify_new_genomes:
         pop = [simplify_node_with_timeout(ind, simplify_timeout) for ind in pop]
     
@@ -868,6 +886,8 @@ def run_ga(
 
     gen_iterator = tqdm(range(gens), desc="GA generations", unit="gen")  # Changed from trange
     for gen in gen_iterator:
+        if LINEAR_TERMS:
+            pop = [bake_linear(ind, inputs, y) for ind in pop]
         scores = [fitness(ind, inputs, y, complexity_coef, inclusion_coef) for ind in pop]
         if use_pareto:
             pareto_objectives_list = [
@@ -994,6 +1014,15 @@ def run_ga(
                 if simplify_new_genomes:
                     child1 = simplify_node_with_timeout(child1, simplify_timeout)
                     child2 = simplify_node_with_timeout(child2, simplify_timeout)
+                # Reject bloated offspring: fall back to the parent when depth exceeds max_depth
+                if random.random() < add_term_prob:
+                    child1 = add_term_mutation(child1)
+                if random.random() < add_term_prob:
+                    child2 = add_term_mutation(child2)
+                if too_big(child1, max_depth):
+                    child1 = parent1.clone()
+                if too_big(child2, max_depth):
+                    child2 = parent2.clone()
                 next_pop.append(child1)
                 if len(next_pop) < pop_size:
                     next_pop.append(child2)
@@ -1012,6 +1041,10 @@ def run_ga(
                 child = point_mutation(child, prob_change=point_mutation_prob)
                 if simplify_new_genomes:
                     child = simplify_node_with_timeout(child, simplify_timeout)
+                if random.random() < add_term_prob:
+                    child = add_term_mutation(child)
+                if too_big(child, max_depth):
+                    child = parent.clone()
                 next_pop.append(child)
         pop = next_pop
 
@@ -1088,21 +1121,226 @@ def random_tree(max_depth: int, prob_const=0.3, const_range=(-5, 5)) -> Node:
     return Var()
 
 
+# Linear-terms mode: the top-level sum of a tree is treated as a linear model whose
+# weights and intercept are fitted by least squares instead of being evolved.
+LINEAR_TERMS = False
+MAX_TERMS = 20
+
+# --- Dimensional consistency (opt-in via var_dimensions/target_dimension in run_ga) ---
+#
+# Each variable is tagged with a "unit" -- a dict of {category: exponent}, e.g. {"Pr": 1}
+# for a plain precipitation-typed variable, or {} for a dimensionless one (a fraction,
+# a sin/cos of month, or a plain number). Two rules are enforced when a target unit is set:
+#   - add/sub:  both sides must carry the same unit, unless one side is a pure number
+#               (a constant, or an expression built only from constants), which is always
+#               allowed since it acts like an implicit offset in whatever unit the other
+#               side has.
+#   - sin/cos/exp/log: the argument must reduce to dimensionless. A constant that enters
+#               through *multiplication* (never addition) is allowed to cancel out
+#               whatever unit is left over, e.g. cos(Pr * C) is fine because C can be
+#               seen as carrying the inverse unit of Pr -- but a bare cos(Te) is not,
+#               and neither is cos(Pr + 5), since an added constant can't rescale a unit.
+# Multiplication/division themselves are never rejected -- Pr*Te is a legal compound
+# unit -- so this stays "loose": it only stops additive apples-and-oranges mistakes and
+# transcendental functions being fed a raw dimensioned quantity with no scale factor.
+DimInfo = collections.namedtuple("DimInfo", ["units", "has_var", "has_const"])
+DIMENSIONLESS = DimInfo({}, False, False)
+
+VAR_DIMENSIONS: Dict[str, Dict[str, int]] = {}
+TARGET_DIMENSION: Dict[str, int] | None = None
+VALID_TERM_VARS: List[str] = []          # single vars whose unit already matches the target
+VALID_TERM_PAIRS: List[Tuple[str, str]] = []  # var pairs whose combined unit matches the target
+
+
+def _merge_units(a: Dict[str, int], b: Dict[str, int], sign: int) -> Dict[str, int]:
+    out = dict(a)
+    for k, v in b.items():
+        out[k] = out.get(k, 0) + sign * v
+    return {k: v for k, v in out.items() if v != 0}
+
+
+def compute_dimension(node: Node) -> DimInfo | None:
+    """Return this subtree's DimInfo, or None if it violates a dimensional rule."""
+    if not VAR_DIMENSIONS and TARGET_DIMENSION is None:
+        return DIMENSIONLESS  # dimension checking is off
+    if isinstance(node, Const):
+        return DimInfo({}, False, True)
+    if isinstance(node, Var):
+        return DimInfo(VAR_DIMENSIONS.get(node.name, {}), True, False)
+    if isinstance(node, Unary):
+        child = compute_dimension(node.child)
+        if child is None:
+            return None
+        if node.func_name in ("sin", "cos", "exp", "log"):
+            if child.units and not child.has_const:
+                return None  # dimensioned argument with no scale factor to cancel it
+            return DimInfo({}, child.has_var, False)
+        return DimInfo(child.units, child.has_var, child.has_const)
+    if isinstance(node, Binary):
+        left = compute_dimension(node.left)
+        right = compute_dimension(node.right)
+        if left is None or right is None:
+            return None
+        if node.func_name in ("add", "sub"):
+            if left.has_var and right.has_var and left.units != right.units:
+                return None  # apples and oranges
+            units = left.units if left.has_var else right.units
+            has_var = left.has_var or right.has_var
+            has_const = (not left.has_var) and (not right.has_var)  # only "free" if the whole thing is a number
+            return DimInfo(units, has_var, has_const)
+        if node.func_name in ("mul", "div"):
+            units = _merge_units(left.units, right.units, 1 if node.func_name == "mul" else -1)
+            return DimInfo(units, left.has_var or right.has_var, left.has_const or right.has_const)
+        if node.func_name == "pow":
+            if left.has_var or right.has_var:
+                return None  # only constant-only subexpressions may use pow under dimension checking
+            return DimInfo({}, False, True)
+    return DIMENSIONLESS
+
+
+def term_is_valid(term: Node) -> bool:
+    """Whether a bare (unweighted) term's dimension matches the target's, given the current
+    dimension registry. Always True when dimension checking is off."""
+    if not VAR_DIMENSIONS and TARGET_DIMENSION is None:
+        return True
+    d = compute_dimension(term)
+    if d is None:
+        return False
+    return (not d.has_var) or d.units == TARGET_DIMENSION
+
+
+def set_dimensions(var_dimensions: Dict[str, Dict[str, int]] | None, target_dimension: Dict[str, int] | None):
+    """Configure dimensional checking for the current run_ga call. Pass None for both to
+    turn checking off (the default)."""
+    global VAR_DIMENSIONS, TARGET_DIMENSION, VALID_TERM_VARS, VALID_TERM_PAIRS
+    VAR_DIMENSIONS = dict(var_dimensions) if var_dimensions else {}
+    TARGET_DIMENSION = target_dimension
+    VALID_TERM_VARS = []
+    VALID_TERM_PAIRS = []
+    if not VAR_DIMENSIONS and target_dimension is None:
+        return
+    for name in VAR_NAMES:
+        if term_is_valid(Var(name)):
+            VALID_TERM_VARS.append(name)
+    for a in VAR_NAMES:
+        for b in VAR_NAMES:
+            if term_is_valid(Binary("mul", Var(a), Var(b))):
+                VALID_TERM_PAIRS.append((a, b))
+    if not VALID_TERM_VARS and not VALID_TERM_PAIRS:
+        raise ValueError(
+            "No combination of the given variables (as a single variable or a product of two) "
+            "produces the required target_dimension. Check var_dimensions/target_dimension."
+        )
+
+
+def split_terms(node: Node) -> List[Node]:
+    """Split a tree on top-level add/sub into terms, dropping bare constants and constant weights."""
+    if isinstance(node, Binary) and node.func_name in ("add", "sub"):
+        return split_terms(node.left) + split_terms(node.right)
+    if isinstance(node, Binary) and node.func_name == "mul":
+        if isinstance(node.left, Const):
+            return split_terms(node.right) if not isinstance(node.right, Const) else []
+        if isinstance(node.right, Const):
+            return split_terms(node.left)
+    if isinstance(node, Const):
+        return []
+    return [node]
+
+
+def linear_fit(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray):
+    """Least-squares fit of y ~ b0 + sum(w_i * term_i). Returns (b0, weights, terms, y_pred) or None."""
+    terms = [t for t in split_terms(ind) if term_is_valid(t)]
+    cols, kept = [], []
+    for t in terms:
+        try:
+            v = np.asarray(t.evaluate(inputs), dtype=float)
+        except Exception:
+            return None
+        if not np.all(np.isfinite(v)) or np.abs(v).max() > 1e8:
+            return None
+        if v.std() > 1e-9:
+            cols.append(v)
+            kept.append(t)
+    b0 = float(np.mean(y))
+    if not cols:
+        return b0, np.zeros(0), [], np.full_like(y, b0, dtype=float)
+    A = np.column_stack(cols)
+    A_mu = A.mean(axis=0)
+    w, *_ = np.linalg.lstsq(A - A_mu, y - b0, rcond=1e-10)
+    b0 = b0 - float(A_mu @ w)
+    return b0, w, kept, b0 + A @ w
+
+
+def bake_linear(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray) -> Node:
+    """Rebuild the tree as b0 + w1*t1 + ... with least-squares weights."""
+    fit = linear_fit(ind, inputs, y)
+    if fit is None:
+        return ind
+    b0, w, terms, _ = fit
+    tree: Node = Const(b0)
+    for wi, t in zip(w, terms):
+        tree = Binary("add", tree, Binary("mul", Const(float(wi)), t.clone()))
+    return tree
+
+
+def predict(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray) -> np.ndarray:
+    if LINEAR_TERMS:
+        fit = linear_fit(ind, inputs, y)
+        if fit is None:
+            raise ValueError("invalid terms")
+        return fit[3]
+    return ind.evaluate(inputs)
+
+
+def too_big(ind: Node, max_depth: int) -> bool:
+    if LINEAR_TERMS:
+        terms = split_terms(ind)
+        return len(terms) > MAX_TERMS or any(t.depth() > max_depth for t in terms)
+    return ind.depth() > max_depth
+
+
+def random_term() -> Node:
+    """A linear or quadratic term: x_i or x_i * x_j. When dimension checking is on, only
+    draws from the combinations whose unit actually matches the target's."""
+    if VALID_TERM_VARS or VALID_TERM_PAIRS:
+        if VALID_TERM_VARS and (not VALID_TERM_PAIRS or random.random() < 0.3):
+            return Var(random.choice(VALID_TERM_VARS))
+        a, b = random.choice(VALID_TERM_PAIRS)
+        return Binary("mul", Var(a), Var(b))
+    if random.random() < 0.3:
+        return Var(random.choice(VAR_NAMES))
+    return Binary("mul", Var(random.choice(VAR_NAMES)), Var(random.choice(VAR_NAMES)))
+
+
+def add_term_mutation(ind: Node) -> Node:
+    return Binary("add", ind.clone(), random_term())
+
+
+def random_quadratic(n_terms: int) -> Node:
+    tree = random_term()
+    for _ in range(n_terms - 1):
+        tree = Binary("add", tree, random_term())
+    return tree
+
+
 # Fitness: mean squared error + complexity penalty
 def fitness(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray, 
             complexity_coef=1e-3, inclusion_coef=1.0) -> float:
     try:
-        y_pred = ind.evaluate(inputs)
+        y_pred = predict(ind, inputs, y)
         if np.any(np.isinf(y_pred)) or np.any(np.isnan(y_pred)):
             return 1e6 + ind.size()
         mse = float(np.mean((y - y_pred)**2))
     except Exception:
         return 1e6 + ind.size()
-    used_vars = gather_used_var_names(ind)
-    missing_vars = set(inputs.keys()) - used_vars
-    inert_vars = detect_inert_variables(ind, inputs, y_pred, candidate_vars=used_vars)
-    missing_vars |= inert_vars
-    inclusion_penalty = inclusion_coef * len(missing_vars)
+    inclusion_penalty = 0.0
+    if inclusion_coef:
+        used_vars = gather_used_var_names(ind)
+        missing_vars = set(inputs.keys()) - used_vars
+        # Compare raw tree outputs: in linear-terms mode y_pred is the refitted prediction
+        base_pred = ind.evaluate(inputs) if LINEAR_TERMS else y_pred
+        missing_vars |= detect_inert_variables(ind, inputs, base_pred, candidate_vars=used_vars)
+        inclusion_penalty = inclusion_coef * len(missing_vars)
     return mse + complexity_coef * ind.size() + inclusion_penalty
 
 
@@ -1455,7 +1693,7 @@ def optimize_constants(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarra
             objective,
             initial_values,
             method=method,
-            options={'maxiter': maxiter, 'disp': False}
+            options={'maxiter': maxiter}
         )
         
         # Update constants with optimized values
@@ -1470,6 +1708,77 @@ def optimize_constants(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarra
             node.value = float(val)
     
     return ind
+
+
+def _distribute(e):
+    """Expand while letting identical factors cancel: push outer multipliers into each summand first."""
+    if isinstance(e, sp.Add):
+        return sp.Add(*[_distribute(a) for a in e.args])
+    if isinstance(e, sp.Mul):
+        sums = [a for a in e.args if isinstance(a, sp.Add)]
+        if sums:
+            s = sums[0]
+            rest = [a for a in e.args if a is not s]
+            return sp.Add(*[_distribute(sp.Mul(*rest, a)) for a in s.args])
+    return sp.expand(e)
+
+
+def simplify_equation(expr, data: Mapping[str, np.ndarray], y: np.ndarray, tol=0.005, min_r2=None, verbose=True):
+    """Numerically simplify a sympy equation against data.
+
+    The equation is expanded into a sum of terms, the term coefficients are refit by least squares,
+    and terms are greedily dropped while R^2 stays within tol of the original (or above min_r2 if
+    given). All numbers are then rounded to the fewest significant figures that keep R^2 within
+    0.001 of the pruned fit. Returns (simplified_expr, r2).
+    """
+    y = np.asarray(y, dtype=float).reshape(-1)
+    n = len(y)
+
+    def r2(p):
+        return 1 - np.sum((y - p) ** 2) / np.sum((y - y.mean()) ** 2)
+
+    def fit(cols):
+        A = np.column_stack([np.ones(n)] + cols)
+        w, *_ = np.linalg.lstsq(A, y, rcond=None)
+        return w, A @ w
+
+    e = sp.powsimp(_distribute(sp.sympify(expr)))
+    syms = sorted(e.free_symbols, key=lambda s: s.name)
+    cols = [np.asarray(data[s.name], dtype=float) for s in syms]
+
+    def evaluate(ex):
+        return np.broadcast_to(np.asarray(sp.lambdify(syms, ex, "numpy")(*cols), float), (n,))
+
+    r2_orig = r2(evaluate(e))
+
+    # Basis functions: each term with its numeric coefficient stripped
+    mons = list(dict.fromkeys(m for m in (t.as_coeff_Mul()[1] for t in sp.Add.make_args(e)) if m.free_symbols))
+    vals = [evaluate(m) for m in mons]
+
+    # Backward elimination: drop the term whose removal hurts R^2 least, while above the floor
+    floor = r2_orig - tol if min_r2 is None else min_r2
+    keep = list(range(len(mons)))
+    while len(keep) > 1:
+        score, drop = max((r2(fit([vals[k] for k in keep if k != i])[1]), i) for i in keep)
+        if score < floor:
+            break
+        keep.remove(drop)
+
+    w, p = fit([vals[k] for k in keep])
+    r2_pruned = r2(p)
+    exact = sp.Float(w[0]) + sum(sp.Float(wi) * mons[k] for wi, k in zip(w[1:], keep))
+
+    # Round every number (including those inside functions) to the fewest significant figures
+    # that keep R^2 within 0.001 of the pruned fit
+    for sig in range(3, 10):
+        simp = exact.xreplace({f: sp.Float(float(f"{float(f):.{sig}g}")) for f in exact.atoms(sp.Float)})
+        r2_new = r2(evaluate(simp))
+        if r2_new >= r2_pruned - 0.001:
+            break
+    simp = simp.xreplace({f: sp.Float(f, sig) for f in simp.atoms(sp.Float)})
+    if verbose:
+        print(f"Simplified: {len(mons)} -> {len(keep)} terms, {sig} sig figs, R2 {r2_orig:.4f} -> {r2_new:.4f}")
+    return simp, float(r2_new)
 
 
 def example():
