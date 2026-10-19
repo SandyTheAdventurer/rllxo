@@ -2,11 +2,9 @@
 
 import random
 import collections
-import copy
 import operator
-import time
 import os
-from typing import Any, Dict, List, Mapping, Tuple
+from typing import Dict, List, Mapping, Tuple
 import warnings
 import multiprocessing as mp
 import numpy as np
@@ -44,47 +42,13 @@ set_global_seed(DEFAULT_SEED)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-def _is_cuda_oom(exc: Exception) -> bool:
-    if isinstance(exc, torch.OutOfMemoryError):
-        return True
-    msg = str(exc).lower()
-    return "cuda" in msg and "out of memory" in msg
-
-
-def _resolve_selector_device(use_learned_crossover: bool, selector_device: str | None = "auto") -> torch.device:
-    requested = os.getenv("RLLXO_SELECTOR_DEVICE", selector_device or "auto")
-    requested = str(requested).strip().lower()
-    if requested not in {"auto", "cpu", "cuda"}:
-        requested = "auto"
-
-    if requested == "cpu":
+def _resolve_selector_device(selector_device: str | None = "auto") -> torch.device:
+    """'cpu' or 'cuda' (env RLLXO_SELECTOR_DEVICE overrides); anything else means CUDA if available."""
+    requested = str(os.getenv("RLLXO_SELECTOR_DEVICE", selector_device or "auto")).strip().lower()
+    if requested == "cpu" or not torch.cuda.is_available():
         return torch.device("cpu")
-    if requested == "cuda":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device("cuda")
 
-    # Auto mode: standard behavior (use CUDA if available).
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def _set_selector_device(new_device: torch.device) -> None:
-    global DEVICE, subtree_selector, selector_optimizer
-    if DEVICE.type == new_device.type:
-        return
-    DEVICE = new_device
-    if subtree_selector is not None:
-        subtree_selector.to(DEVICE)
-    if selector_optimizer is not None:
-        for state in selector_optimizer.state.values():
-            for key, value in state.items():
-                if torch.is_tensor(value):
-                    state[key] = value.to(DEVICE)
-
-def log_device_info() -> None:
-    """Print CUDA/device info when explicitly requested."""
-    print(f"Using device: {DEVICE}")
-    if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"CUDA Version: {torch.version.cuda}")
 
 # Protected operators to avoid NaNs/Infs
 def pdiv(a, b):
@@ -168,8 +132,8 @@ class Node:
     def evaluate(self, inputs: Mapping[str, np.ndarray]) -> np.ndarray:
         raise NotImplementedError
 
-    def clone(self):
-        return copy.deepcopy(self)
+    def clone(self) -> "Node":
+        raise NotImplementedError
 
     def size(self) -> int:
         raise NotImplementedError
@@ -190,6 +154,9 @@ class Node:
 class Const(Node):
     def __init__(self, value: float):
         self.value = float(value)
+
+    def clone(self):
+        return Const(self.value)
 
     def evaluate(self, inputs):
         reference = next(iter(inputs.values()))
@@ -215,6 +182,9 @@ class Var(Node):
     def __init__(self, name: str = None):
         self.name = name or VAR_NAMES[0]
 
+    def clone(self):
+        return Var(self.name)
+
     def evaluate(self, inputs):
         return inputs[self.name]
 
@@ -238,6 +208,9 @@ class Unary(Node):
     def __init__(self, func_name: str, child: Node):
         self.func_name = func_name
         self.child = child
+
+    def clone(self):
+        return Unary(self.func_name, self.child.clone())
 
     def evaluate(self, inputs):
         f = UNARY_FUNCS[self.func_name]
@@ -265,6 +238,9 @@ class Binary(Node):
         self.func_name = func_name
         self.left = left
         self.right = right
+
+    def clone(self):
+        return Binary(self.func_name, self.left.clone(), self.right.clone())
 
     def evaluate(self, inputs):
         f = BINARY_FUNCS[self.func_name]
@@ -317,28 +293,6 @@ def replace_child(parent: Node, attr_name: str, new_child: Node):
         setattr(parent, attr_name, new_child)
 
 
-def subtree_crossover(a: Node, b: Node) -> Tuple[Node, Node]:
-    a_clone = a.clone()
-    b_clone = b.clone()
-    a_nodes = collect_nodes_with_parents(a_clone)
-    b_nodes = collect_nodes_with_parents(b_clone)
-    # avoid replacing the entire tree in both directions maybe
-    node_a, parent_a, attr_a = random.choice(a_nodes)
-    node_b, parent_b, attr_b = random.choice(b_nodes)
-    # Swap node_a and node_b in clones
-    if parent_a is None:
-        new_a = node_b.clone()
-    else:
-        new_a = a_clone
-        replace_child(parent_a, attr_a, node_b.clone())
-    if parent_b is None:
-        new_b = node_a.clone()
-    else:
-        new_b = b_clone
-        replace_child(parent_b, attr_b, node_a.clone())
-    return new_a, new_b
-
-
 def point_mutation(ind: Node, prob_change=0.1) -> Node:
     ind_clone = ind.clone()
     for node, parent, attr in collect_nodes_with_parents(ind_clone):
@@ -358,55 +312,17 @@ def point_mutation(ind: Node, prob_change=0.1) -> Node:
 
 
 # Selection: tournament
-def tournament_select(pop: List[Node], scores: List[float], k=3, timeout=10.0) -> Node:
-    if not pop:
-        raise ValueError("Population must contain at least one individual.")
-    best = tournament_pick_index(
-        pop_size=len(pop),
-        score_key=lambda i: scores[i],
-        k=k,
-        timeout=timeout,
-    )
-    return pop[best].clone()
-
-
-def tournament_pick_index(pop_size: int, score_key, k=3, timeout=10.0) -> int:
+def tournament_pick_index(pop_size: int, score_key, k=3) -> int:
+    """Index of the best (lowest score_key) of k distinct random individuals."""
     if pop_size <= 0:
         raise ValueError("Population size must be > 0.")
-    deadline = time.perf_counter() + timeout
-    sample_size = min(k, pop_size)
-    while True:
-        try:
-            selected_idx = random.sample(range(pop_size), sample_size)
-            return min(selected_idx, key=score_key)
-        except Exception:
-            if time.perf_counter() >= deadline:
-                return random.randrange(pop_size)
+    return min(random.sample(range(pop_size), min(k, pop_size)), key=score_key)
 
 
 def pareto_objectives(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray,
                       inclusion_coef=1.0) -> Tuple[float, float]:
     """Return (error_with_inclusion, complexity) objectives for Pareto sorting."""
-    try:
-        y_pred = predict(ind, inputs, y)
-        if np.any(np.isinf(y_pred)) or np.any(np.isnan(y_pred)):
-            return 1e6 + ind.size(), float(ind.size())
-        mse = float(np.mean((y - y_pred) ** 2))
-    except Exception:
-        return 1e6 + ind.size(), float(ind.size())
-    inclusion_penalty = 0.0
-    if inclusion_coef:
-        used_vars = gather_used_var_names(ind)
-        missing_vars = set(inputs.keys()) - used_vars
-        # Compare raw tree outputs: in linear-terms mode y_pred is the refitted prediction
-        base_pred = ind.evaluate(inputs) if LINEAR_TERMS else y_pred
-        missing_vars |= detect_inert_variables(ind, inputs, base_pred, candidate_vars=used_vars)
-        inclusion_penalty = inclusion_coef * len(missing_vars)
-    return mse + inclusion_penalty, float(ind.size())
-
-
-def _pareto_dominates(a: Tuple[float, ...], b: Tuple[float, ...]) -> bool:
-    return all(x <= y for x, y in zip(a, b)) and any(x < y for x, y in zip(a, b))
+    return score_individual(ind, inputs, y, 0.0, inclusion_coef)[1]
 
 
 def pareto_rank_and_crowding(objectives: List[Tuple[float, ...]]):
@@ -417,18 +333,12 @@ def pareto_rank_and_crowding(objectives: List[Tuple[float, ...]]):
     num_obj = len(objectives[0]) if objectives[0] else 0
     if num_obj == 0:
         return [0] * n, [0.0] * n
-    domination_sets = [set() for _ in range(n)]
-    domination_counts = [0] * n
+    obj = np.asarray(objectives, dtype=float)
+    # dominates[i, j]: i is no worse than j everywhere and strictly better somewhere
+    dominates = (obj[:, None] <= obj[None]).all(-1) & (obj[:, None] < obj[None]).any(-1)
+    domination_sets = [set(np.flatnonzero(row).tolist()) for row in dominates]
+    domination_counts = dominates.sum(axis=0).tolist()
     fronts = []
-
-    for i in range(n):
-        for j in range(i + 1, n):
-            if _pareto_dominates(objectives[i], objectives[j]):
-                domination_sets[i].add(j)
-                domination_counts[j] += 1
-            elif _pareto_dominates(objectives[j], objectives[i]):
-                domination_sets[j].add(i)
-                domination_counts[i] += 1
 
     current_front = [i for i in range(n) if domination_counts[i] == 0]
     rank = [0] * n
@@ -469,240 +379,222 @@ def pareto_rank_and_crowding(objectives: List[Tuple[float, ...]]):
     return rank, crowding
 
 
-def tournament_select_pareto(pop: List[Any], ranks: List[int], crowding: List[float], scores: List[float],
-                             k=3, timeout=10.0) -> Any:
-    if not pop:
-        raise ValueError("Population must contain at least one individual.")
-    best = tournament_pick_index(
-        pop_size=len(pop),
-        score_key=lambda i: (ranks[i], -crowding[i], scores[i]),
-        k=k,
-        timeout=timeout,
-    )
-    return pop[best].clone()
+# Neural networks that learn to select good subtree crossover points using A2C.
+ACTIVATIONS = {
+    'relu': nn.ReLU,
+    'tanh': nn.Tanh,
+    'sigmoid': nn.Sigmoid,
+    'leaky_relu': nn.LeakyReLU,
+    'elu': nn.ELU,
+    'gelu': nn.GELU,
+}
 
 
-# Neural network that learns to select good subtree crossover points using A2C.
+def _activation(name: str) -> nn.Module:
+    if name not in ACTIVATIONS:
+        raise ValueError(f"Unsupported activation: {name}. Choose from {list(ACTIVATIONS)}")
+    return ACTIVATIONS[name]()
+
+
 class SubtreeSelector(nn.Module):
-    def __init__(self, feature_dim=10, hidden_dim=64, use_transformer=False, num_heads=4, num_layers=2,
-                 mlp_layers=3, mlp_activation='relu', mlp_dropout=0.0, use_critic=True):
+    """Scores every node independently with an MLP; a pair's logit is the sum of its two node logits."""
+
+    def __init__(self, feature_dim=10, hidden_dim=64, mlp_layers=3, mlp_activation='relu',
+                 mlp_dropout=0.0, use_critic=True):
         super().__init__()
-        self.use_transformer = use_transformer
         self.use_critic = use_critic
-        
-        if use_transformer:
-            # Transformer-based feature extractor
-            self.feature_projection = nn.Linear(feature_dim, hidden_dim)
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model=hidden_dim,
-                nhead=num_heads,
-                dim_feedforward=hidden_dim * 4,
-                dropout=0.1,
-                batch_first=True
-            )
-            self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-            
-            # Actor head (policy)
-            self.actor = nn.Linear(hidden_dim, 1)
-            # Critic head (value function) - only if enabled
-            if self.use_critic:
-                self.critic = nn.Linear(hidden_dim, 1)
-        else:
-            # Customizable MLP-based feature extractor
-            activation_map = {
-                'relu': nn.ReLU,
-                'tanh': nn.Tanh,
-                'sigmoid': nn.Sigmoid,
-                'leaky_relu': nn.LeakyReLU,
-                'elu': nn.ELU,
-                'gelu': nn.GELU,
-            }
-            
-            if mlp_activation not in activation_map:
-                raise ValueError(f"Unsupported activation: {mlp_activation}. Choose from {list(activation_map.keys())}")
-            
-            activation_fn = activation_map[mlp_activation]
-            
-            # Build shared MLP layers
-            shared_layers = []
-            input_size = feature_dim
-            
-            for i in range(mlp_layers - 1):
-                shared_layers.append(nn.Linear(input_size, hidden_dim))
-                shared_layers.append(activation_fn())
-                if mlp_dropout > 0:
-                    shared_layers.append(nn.Dropout(mlp_dropout))
-                input_size = hidden_dim
-            
-            self.shared_net = nn.Sequential(*shared_layers)
-            
-            # Actor head (policy) - outputs action logits
-            self.actor = nn.Linear(hidden_dim, 1)
-            
-            # Critic head (value function) - only if enabled
-            if self.use_critic:
-                self.critic = nn.Linear(hidden_dim, 1)
-        
-        # Move model to device
+        layers = []
+        input_size = feature_dim
+        for _ in range(mlp_layers - 1):
+            layers += [nn.Linear(input_size, hidden_dim), _activation(mlp_activation)]
+            if mlp_dropout > 0:
+                layers.append(nn.Dropout(mlp_dropout))
+            input_size = hidden_dim
+        self.shared_net = nn.Sequential(*layers)
+        self.actor = nn.Linear(hidden_dim, 1)
+        if self.use_critic:
+            self.critic = nn.Linear(hidden_dim, 1)
         self.to(DEVICE)
-    
+
     def forward(self, features, return_value=False):
-        """Returns action logits and optionally value estimates.
-        
-        Args:
-            features: (batch_size, feature_dim) or (batch_size, seq_len, feature_dim)
-            return_value: If True, also return value estimates from critic
-        
-        Returns:
-            If return_value=False: action_logits
-            If return_value=True: (action_logits, values) or (action_logits, None) if no critic
-        """
-        if self.use_transformer:
-            # If 2D, add sequence dimension
-            if features.dim() == 2:
-                features = features.unsqueeze(0)  # (1, seq_len, feature_dim)
-            
-            # Project features to transformer dimension
-            x = self.feature_projection(features)  # (batch, seq_len, hidden_dim)
-            
-            # Apply transformer encoder
-            x = self.transformer(x)  # (batch, seq_len, hidden_dim)
-            
-            # Actor and critic outputs
-            action_logits = self.actor(x).squeeze(-1)  # (batch, seq_len)
-            
-            # Remove batch dimension if it was added
-            if action_logits.dim() == 2 and action_logits.size(0) == 1:
-                action_logits = action_logits.squeeze(0)
-            
-            if return_value:
-                if self.use_critic:
-                    values = self.critic(x).squeeze(-1)  # (batch, seq_len)
-                    if values.dim() == 2 and values.size(0) == 1:
-                        values = values.squeeze(0)
-                else:
-                    values = None
-                return action_logits, values
-            else:
-                return action_logits
-        else:
-            # MLP path
-            shared_features = self.shared_net(features)
-            action_logits = self.actor(shared_features).squeeze(-1)
-            
-            if return_value:
-                if self.use_critic:
-                    values = self.critic(shared_features).squeeze(-1)
-                else:
-                    values = None
-                return action_logits, values
-            else:
-                return action_logits
+        """Per-node action logits (N,), plus critic values (N,) or None when return_value is set."""
+        shared = self.shared_net(features)
+        logits = self.actor(shared).squeeze(-1)
+        if not return_value:
+            return logits
+        return logits, (self.critic(shared).squeeze(-1) if self.use_critic else None)
+
+    def score_pairs(self, a_feats: torch.Tensor, b_feats: torch.Tensor):
+        """Joint logits (Na, Nb) over node pairs, and critic values (Na, Nb) or None."""
+        a_logits, a_values = self(a_feats, return_value=True)
+        b_logits, b_values = self(b_feats, return_value=True)
+        logits = a_logits.unsqueeze(1) + b_logits.unsqueeze(0)
+        if a_values is None:
+            return logits, None
+        return logits, (a_values.unsqueeze(1) + b_values.unsqueeze(0)) / 2.0
 
 
-def selector_pick_action(selector: SubtreeSelector, features: torch.Tensor,
-                         temperature: float = 1.0) -> Tuple[int, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Sample one action index from selector logits and return RL stats.
+class PairSelector(nn.Module):
+    """Scores node pairs jointly: each parent's nodes attend to the other parent's nodes.
 
-    This helper is additive and does not alter existing GA logic in this file.
+    Nodes are embedded by an MLP, refined by self-attention within their own tree (with a
+    tree-distance bias so attention knows the structure) and cross-attention to the other
+    parent, and every pair (i, j) is scored by a bilinear term plus an MLP on [h_i, h_j, h_i*h_j].
     """
-    action_logits, values = selector(features, return_value=True)
-    safe_temp = max(float(temperature), 1e-6)
-    action_logits = torch.clamp(action_logits / safe_temp, -10.0, 10.0)
-    probs = torch.softmax(action_logits, dim=0)
-    probs = torch.clamp(probs, min=1e-8)
-    probs = probs / probs.sum()
 
-    idx = int(torch.multinomial(probs, 1).item()) if probs.numel() > 1 else 0
-    log_prob = torch.log(probs[idx])
-    entropy = -torch.sum(probs * torch.log(probs + 1e-10))
-    selected_value = values[idx] if values is not None else None
-    return idx, log_prob, entropy, selected_value
+    def __init__(self, feature_dim=10, hidden_dim=64, num_heads=4, num_layers=1, mlp_activation='relu',
+                 use_critic=True):
+        super().__init__()
+        self.use_critic = use_critic
+        self.num_heads = num_heads
+        self.embed = nn.Sequential(nn.Linear(feature_dim, hidden_dim), _activation(mlp_activation),
+                                   nn.Linear(hidden_dim, hidden_dim))
+        self.self_attn = nn.ModuleList(nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
+                                       for _ in range(num_layers))
+        self.cross_attn = nn.ModuleList(nn.MultiheadAttention(hidden_dim, num_heads, batch_first=True)
+                                        for _ in range(num_layers))
+        self.norms = nn.ModuleList(nn.LayerNorm(hidden_dim) for _ in range(2 * num_layers))
+        # Learned per-head bias on tree distance (clipped), so self-attention sees the tree's shape
+        self.max_dist = 8
+        self.dist_bias = nn.Embedding(self.max_dist + 1, num_heads)
+        self.bilinear = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.pair_mlp = nn.Sequential(nn.Linear(3 * hidden_dim, hidden_dim), _activation(mlp_activation),
+                                      nn.Linear(hidden_dim, 1))
+        if self.use_critic:
+            self.critic = nn.Sequential(nn.Linear(2 * hidden_dim, hidden_dim), _activation(mlp_activation),
+                                        nn.Linear(hidden_dim, 1))
+        self.to(DEVICE)
+
+    def _encode(self, feats, dists, other, other_dists):
+        h, g = self.embed(feats).unsqueeze(0), self.embed(other).unsqueeze(0)
+        mask = -self.dist_bias(dists.clamp(max=self.max_dist)).permute(2, 0, 1)
+        other_mask = -self.dist_bias(other_dists.clamp(max=self.max_dist)).permute(2, 0, 1)
+        for k, (sa, ca) in enumerate(zip(self.self_attn, self.cross_attn)):
+            h = self.norms[2 * k](h + sa(h, h, h, attn_mask=mask, need_weights=False)[0])
+            g = self.norms[2 * k](g + sa(g, g, g, attn_mask=other_mask, need_weights=False)[0])
+            h, g = (self.norms[2 * k + 1](h + ca(h, g, g, need_weights=False)[0]),
+                    self.norms[2 * k + 1](g + ca(g, h, h, need_weights=False)[0]))
+        return h.squeeze(0), g.squeeze(0)
+
+    def score_pairs(self, a_feats, b_feats, a_dists, b_dists):
+        h, g = self._encode(a_feats, a_dists, b_feats, b_dists)
+        na, nb, d = h.shape[0], g.shape[0], h.shape[1]
+        hi = h.unsqueeze(1).expand(na, nb, d)
+        gj = g.unsqueeze(0).expand(na, nb, d)
+        logits = self.bilinear(h) @ g.T / d ** 0.5 + self.pair_mlp(torch.cat([hi, gj, hi * gj], -1)).squeeze(-1)
+        if not self.use_critic:
+            return logits, None
+        # Value of the parent pair as a whole, shared by all of its node pairs
+        value = self.critic(torch.cat([h.mean(0), g.mean(0)])).squeeze(-1)
+        return logits, value.expand(na, nb)
 
 
-def selector_a2c_losses(log_probs: torch.Tensor, rewards: torch.Tensor, entropies: torch.Tensor,
-                        values: torch.Tensor | None = None, critic_weight: float = 0.5,
-                        entropy_weight: float = 0.01) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute actor/critic/entropy-combined loss for selector training.
+def heuristic_bias(a_feats: torch.Tensor, b_feats: torch.Tensor) -> torch.Tensor:
+    """Hand-crafted compatibility H(n_i, m_j) for every node pair of two parents."""
+    a_type = torch.argmax(a_feats[:, :4], dim=1)
+    b_type = torch.argmax(b_feats[:, :4], dim=1)
+    type_match = (a_type.unsqueeze(1) == b_type.unsqueeze(0)).to(a_feats.dtype)
+    size_gap = torch.abs(a_feats[:, 4].unsqueeze(1) - b_feats[:, 4].unsqueeze(0))
+    depth_gap = torch.abs(a_feats[:, 5].unsqueeze(1) - b_feats[:, 5].unsqueeze(0))
+    a_ops, b_ops = a_feats[:, 10:], b_feats[:, 10:]
+    op_match = a_ops @ b_ops.transpose(0, 1) if a_ops.numel() and b_ops.numel() else torch.zeros_like(type_match)
+    return 0.15 * type_match + 0.20 * op_match - 0.10 * size_gap - 0.08 * depth_gap
 
-    This helper is additive and does not alter existing GA logic in this file.
+
+def pair_distribution(selector, a, b, temperature: float, heuristic_bias_scale: float):
+    """Flattened joint logits over (a_node, b_node) pairs and matching critic values (or None).
+
+    a and b are (features, tree_distances) tuples. selector=None scores pairs by H alone.
     """
-    if values is not None and values.numel() == rewards.numel():
-        advantages = rewards - values.detach()
-        actor_loss = -(log_probs * advantages).mean()
-        critic_loss = torch.mean((rewards - values) ** 2)
+    if selector is None:
+        logits, values = torch.zeros(a[0].shape[0], b[0].shape[0], device=a[0].device), None
+    elif isinstance(selector, PairSelector):
+        logits, values = selector.score_pairs(a[0], b[0], a[1], b[1])
     else:
-        advantages = rewards - rewards.mean()
-        actor_loss = -(log_probs * advantages.detach()).mean()
-        critic_loss = torch.tensor(0.0, device=log_probs.device)
-
-    entropy_bonus = entropies.mean()
-    total_loss = actor_loss + critic_weight * critic_loss - entropy_weight * entropy_bonus
-    return total_loss, actor_loss, critic_loss
+        logits, values = selector.score_pairs(a[0], b[0])
+    if heuristic_bias_scale:
+        logits = logits + float(heuristic_bias_scale) * heuristic_bias(a[0], b[0])
+    flat = torch.clamp(logits / max(float(temperature), 1e-6), -10.0, 10.0).reshape(-1)
+    return flat, (values.reshape(-1) if values is not None else None)
 
 
-def extract_subtree_features(node: Node, parent: Node, depth_from_root: int, 
-                            tree_size: int, tree_depth: int) -> torch.Tensor:
-    """Extract features for a subtree rooted at 'node'."""
-    features = []
-    
-    # Node type features (one-hot-ish)
-    features.append(1.0 if isinstance(node, Const) else 0.0)
-    features.append(1.0 if isinstance(node, Var) else 0.0)
-    features.append(1.0 if isinstance(node, Unary) else 0.0)
-    features.append(1.0 if isinstance(node, Binary) else 0.0)
-    
-    # Structural features
-    features.append(node.size() / max(tree_size, 1))  # Relative size
-    features.append(node.depth() / max(tree_depth, 1))  # Relative depth
-    features.append(depth_from_root / max(tree_depth, 1))  # Position in tree
-    
-    # Parent features
-    features.append(1.0 if parent is None else 0.0)  # Is root
-    features.append(1.0 if isinstance(parent, Unary) else 0.0)
-    features.append(1.0 if isinstance(parent, Binary) else 0.0)
-
-    # Specific operator features
+def _node_features(node: Node, parent: Node | None, depth_from_root: int, size: int, depth: int,
+                   tree_size: int, tree_depth: int) -> List[float]:
+    """Feature row for the subtree rooted at node: type, structure, parent type, operator one-hots."""
+    features = [
+        float(isinstance(node, Const)),
+        float(isinstance(node, Var)),
+        float(isinstance(node, Unary)),
+        float(isinstance(node, Binary)),
+        size / max(tree_size, 1),
+        depth / max(tree_depth, 1),
+        depth_from_root / max(tree_depth, 1),
+        float(parent is None),
+        float(isinstance(parent, Unary)),
+        float(isinstance(parent, Binary)),
+    ]
     unary_one_hot = [0.0] * len(ALL_UNARY)
-    if isinstance(node, Unary):
-        try:
-            unary_one_hot[ALL_UNARY.index(node.func_name)] = 1.0
-        except ValueError:
-            pass
-    features.extend(unary_one_hot)
-
+    if isinstance(node, Unary) and node.func_name in ALL_UNARY:
+        unary_one_hot[ALL_UNARY.index(node.func_name)] = 1.0
     binary_one_hot = [0.0] * len(ALL_BINARY)
-    if isinstance(node, Binary):
-        try:
-            binary_one_hot[ALL_BINARY.index(node.func_name)] = 1.0
-        except ValueError:
-            pass
-    features.extend(binary_one_hot)
-    
-    return torch.tensor(features, dtype=torch.float32, device=DEVICE)
+    if isinstance(node, Binary) and node.func_name in ALL_BINARY:
+        binary_one_hot[ALL_BINARY.index(node.func_name)] = 1.0
+    return features + unary_one_hot + binary_one_hot
 
-def collect_nodes_with_features(node: Node, parent=None, attr_name=None, depth=0):
-    """Collect nodes with parent info and features."""
-    tree_size = node.size()
-    tree_depth = node.depth()
-    
-    def recurse(n, p, attr, d):
-        features = extract_subtree_features(n, p, d, tree_size, tree_depth)
-        res = [(n, p, attr, features)]
+
+def collect_nodes_with_features(root: Node, with_distances=False):
+    """Pre-order [(node, parent, attr)], an (N, feature_dim) feature tensor and, if asked,
+    the (N, N) matrix of tree (edge-count) distances between nodes."""
+    nodes, info, parent_idx = [], [], []
+
+    def visit(n, p, attr, d, p_idx):
+        i = len(nodes)
+        nodes.append((n, p, attr))
+        info.append(None)
+        parent_idx.append(p_idx)
+        size, depth = 1, 0
         if isinstance(n, Unary):
-            res += recurse(n.child, n, 'child', d + 1)
+            s, h = visit(n.child, n, 'child', d + 1, i)
+            size, depth = 1 + s, 1 + h
         elif isinstance(n, Binary):
-            res += recurse(n.left, n, 'left', d + 1)
-            res += recurse(n.right, n, 'right', d + 1)
-        return res
-    
-    return recurse(node, parent, attr_name, depth)
+            ls, lh = visit(n.left, n, 'left', d + 1, i)
+            rs, rh = visit(n.right, n, 'right', d + 1, i)
+            size, depth = 1 + ls + rs, 1 + max(lh, rh)
+        info[i] = (n, p, d, size, depth)
+        return size, depth
 
-# Global selector (will be initialized in run_ga)
+    tree_size, tree_depth = visit(root, None, None, 0, -1)
+    rows = [_node_features(*row, tree_size, tree_depth) for row in info]
+    feats = torch.tensor(rows, dtype=torch.float32, device=DEVICE)
+    if not with_distances:
+        return nodes, feats, None
+    # dist(i, j) = depth(i) + depth(j) - 2 * depth(lca); ancestors via parent pointers
+    n = len(nodes)
+    anc = np.zeros((n, n), dtype=bool)
+    for i in range(n):
+        anc[i, i] = True
+        if parent_idx[i] >= 0:
+            anc[i] |= anc[parent_idx[i]]
+    depths = np.array([row[2] for row in info])
+    common = anc.astype(np.int64) @ anc.T.astype(np.int64)  # number of shared ancestors = depth(lca) + 1
+    dists = depths[:, None] + depths[None, :] - 2 * (common - 1)
+    return nodes, feats, torch.as_tensor(dists, device=DEVICE)
+
+
+# Selector state for the current run_ga call
 subtree_selector = None
 selector_optimizer = None
 crossover_history = []
-selector_feature_dim = None
+SELECTOR_TYPE = 'mlp'
+
+
+def r2_score_of(y: np.ndarray, y_pred: np.ndarray) -> float | None:
+    """R² of a prediction, or None if it has NaN/inf or y is constant."""
+    if np.any(np.isnan(y_pred)) or np.any(np.isinf(y_pred)):
+        return None
+    ss_tot = np.sum((y - np.mean(y)) ** 2)
+    return 1 - np.sum((y - y_pred) ** 2) / ss_tot if ss_tot > 0 else None
+
 
 # Genetic algorithm
 def run_ga(
@@ -719,14 +611,14 @@ def run_ga(
     var_names=None,
     unary_funcs=None,
     use_learned_crossover=True,
+    selector_type='mlp',
     selector_lr=0.001,
-    use_transformer=False,
-    transformer_heads=4,
-    transformer_layers=2,
     mlp_layers=3,
     mlp_hidden_dim=64,
     mlp_activation='relu',
     mlp_dropout=0.0,
+    attn_heads=4,
+    attn_layers=1,
     use_critic=True,
     stopping_metric='mse',
     stopping_threshold=None,
@@ -746,7 +638,7 @@ def run_ga(
     critic_weight=0.5,
     entropy_weight=0.01,
     use_pareto=False,
-    opt_constants=False,  # Renamed to avoid shadowing the function
+    opt_constants=False,
     const_opt_freq=5,
     const_opt_method='L-BFGS-B',
     const_opt_maxiter=50,
@@ -764,38 +656,36 @@ def run_ga(
     var_dimensions=None,
     target_dimension=None,
 ):
-    global subtree_selector, selector_optimizer, crossover_history, selector_feature_dim
-    
+    """Evolve an expression for y. selector_type picks the learned crossover policy:
+    'mlp' (per-node SubtreeSelector), 'pair' (cross-attention PairSelector) or
+    'heuristic' (H alone, no learning). Returns (best_tree, best_r2)."""
+    global subtree_selector, selector_optimizer, crossover_history, SELECTOR_TYPE, DEVICE
+
     if seed is None:
         seed = DEFAULT_SEED
     set_global_seed(seed)
-    
+
     inputs, resolved_names = prepare_inputs(x, var_names)
     set_variables(resolved_names)
 
-    target_device = _resolve_selector_device(use_learned_crossover, selector_device)
-    _set_selector_device(target_device)
+    DEVICE = _resolve_selector_device(selector_device)
     if verbose and use_learned_crossover:
         print(f"Selector device: {DEVICE}")
-    
+
     # Configure unary functions
     global UNARY_FUNCS, SYMPY_UNARY, ALL_UNARY
     if unary_funcs is not None:
         if not isinstance(unary_funcs, dict):
             raise ValueError("unary_funcs must be a dict mapping names to (numpy_func, sympy_func) tuples")
-        UNARY_FUNCS = {}
-        SYMPY_UNARY = {}
+        UNARY_FUNCS, SYMPY_UNARY = {}, {}
         for name, funcs in unary_funcs.items():
-            if isinstance(funcs, tuple) and len(funcs) == 2:
-                UNARY_FUNCS[name] = funcs[0]
-                SYMPY_UNARY[name] = funcs[1]
-            else:
+            if not (isinstance(funcs, tuple) and len(funcs) == 2):
                 raise ValueError(f"Each unary function must be a (numpy_func, sympy_func) tuple, got {funcs}")
-        ALL_UNARY = list(UNARY_FUNCS.keys())
+            UNARY_FUNCS[name], SYMPY_UNARY[name] = funcs
     else:
         UNARY_FUNCS = dict(DEFAULT_UNARY_FUNCS)
         SYMPY_UNARY = {name: DEFAULT_SYMPY_UNARY[name] for name in UNARY_FUNCS}
-        ALL_UNARY = list(UNARY_FUNCS.keys())
+    ALL_UNARY = list(UNARY_FUNCS.keys())
 
     # Configure binary functions (optional pow support)
     global BINARY_FUNCS, SYMPY_BINARY, ALL_BINARY
@@ -811,50 +701,48 @@ def run_ga(
     MAX_TERMS = int(max_terms)
     set_dimensions(var_dimensions, target_dimension)
 
-    # Reset crossover history whenever we start a new GA run so feature sizes stay consistent
     crossover_history = []
-    selector_feature_dim = get_selector_feature_dim()
-    
+
     init_max_depth = max(1, max_init_depth)
     pop = [
-        random_tree(
-            max_depth=random.randint(1, init_max_depth),
-            prob_const=prob_const,
-            const_range=const_range,
-        )
+        random_tree(max_depth=random.randint(1, init_max_depth), prob_const=prob_const, const_range=const_range)
         for _ in range(pop_size)
     ]
-    n_quad = int(quadratic_init_frac * pop_size)
-    for i in range(n_quad):
+    for i in range(int(quadratic_init_frac * pop_size)):
         pop[i] = random_quadratic(random.randint(2, max(2, max_terms // 2)))
     if simplify_new_genomes:
         pop = [simplify_node_with_timeout(ind, simplify_timeout) for ind in pop]
-    
-    # Initialize subtree selector
-    if use_learned_crossover:
+
+    # Initialize the crossover selector
+    if selector_type not in ('mlp', 'pair', 'heuristic'):
+        raise ValueError("selector_type must be 'mlp', 'pair' or 'heuristic'")
+    SELECTOR_TYPE = selector_type
+    subtree_selector = selector_optimizer = None
+    if use_learned_crossover and selector_type == 'mlp':
         subtree_selector = SubtreeSelector(
             feature_dim=get_selector_feature_dim(),
             hidden_dim=mlp_hidden_dim,
-            use_transformer=use_transformer,
-            num_heads=transformer_heads,
-            num_layers=transformer_layers,
             mlp_layers=mlp_layers,
             mlp_activation=mlp_activation,
             mlp_dropout=mlp_dropout,
-            use_critic=use_critic,  # Pass the critic flag
+            use_critic=use_critic,
         )
+    elif use_learned_crossover and selector_type == 'pair':
+        subtree_selector = PairSelector(
+            feature_dim=get_selector_feature_dim(),
+            hidden_dim=mlp_hidden_dim,
+            num_heads=attn_heads,
+            num_layers=attn_layers,
+            mlp_activation=mlp_activation,
+            use_critic=use_critic,
+        )
+    if subtree_selector is not None:
         selector_optimizer = optim.Adam(subtree_selector.parameters(), lr=selector_lr)
-        if verbose:
-            critic_mode = "A2C (with critic)" if use_critic else "Policy Gradient (no critic)"
-            if use_transformer:
-                print(f"Using learned subtree crossover with Transformer encoder ({transformer_layers} layers, {transformer_heads} heads, {critic_mode})")
-            else:
-                print(f"Using learned subtree crossover with MLP ({mlp_layers} layers, {mlp_hidden_dim} hidden, {mlp_activation} activation, {mlp_dropout} dropout, {critic_mode})")
-    else:
-        subtree_selector = None
-        if verbose:
-            print("Using random subtree crossover")
-    
+    if verbose:
+        print(f"Crossover: {selector_type if use_learned_crossover else 'random'}"
+              + (f" ({sum(p.numel() for p in subtree_selector.parameters())} params, "
+                 f"{'A2C' if use_critic else 'policy gradient'})" if subtree_selector is not None else ""))
+
     # Validate stopping criterion
     if stopping_threshold is not None:
         if stopping_metric not in ['mse', 'r2', None]:
@@ -862,8 +750,9 @@ def run_ga(
         if stopping_metric == 'r2' and (stopping_threshold < 0 or stopping_threshold > 1):
             print(f"Warning: R² stopping threshold {stopping_threshold} is outside typical range [0, 1]")
         if verbose:
-            print(f"Stopping criterion: {stopping_metric} <= {stopping_threshold}" if stopping_metric == 'mse' else f"Stopping criterion: {stopping_metric} >= {stopping_threshold}")
-    
+            op = "<=" if stopping_metric == 'mse' else ">="
+            print(f"Stopping criterion: {stopping_metric} {op} {stopping_threshold}")
+
     y = np.asarray(y, dtype=float).reshape(-1)
     n_samples = len(next(iter(inputs.values())))
     if y.shape[0] != n_samples:
@@ -871,12 +760,7 @@ def run_ga(
 
     def evaluate_r2(individual):
         try:
-            preds = individual.evaluate(inputs)
-            if np.any(np.isnan(preds)) or np.any(np.isinf(preds)):
-                return None
-            ss_res = np.sum((y - preds) ** 2)
-            ss_tot = np.sum((y - np.mean(y)) ** 2)
-            return 1 - (ss_res / ss_tot) if ss_tot > 0 else None
+            return r2_score_of(y, individual.evaluate(inputs))
         except Exception:
             return None
 
@@ -884,29 +768,21 @@ def run_ga(
     best_score = float('inf')
     best_r2 = None
 
-    gen_iterator = tqdm(range(gens), desc="GA generations", unit="gen")  # Changed from trange
-    for gen in gen_iterator:
+    for gen in tqdm(range(gens), desc="GA generations", unit="gen"):
         if LINEAR_TERMS:
             pop = [bake_linear(ind, inputs, y) for ind in pop]
-        scores = [fitness(ind, inputs, y, complexity_coef, inclusion_coef) for ind in pop]
+        scores, objectives = zip(*(score_individual(ind, inputs, y, complexity_coef, inclusion_coef) for ind in pop))
+        scores = list(scores)
         if use_pareto:
-            pareto_objectives_list = [
-                pareto_objectives(ind, inputs, y, inclusion_coef)
-                for ind in pop
-            ]
-            pareto_ranks, pareto_crowding = pareto_rank_and_crowding(pareto_objectives_list)
+            ranks, crowding = pareto_rank_and_crowding(list(objectives))
+            tournament_key = lambda i: (ranks[i], -crowding[i], scores[i])
         else:
-            pareto_ranks, pareto_crowding = None, None
-        
-        # Update selector every few generations
-        if (
-            use_learned_crossover
-            and gen >= max(1, int(selector_warmup_gens))
-            and gen % selector_update_freq == 0
-        ):
-            mean_reward = update_selector(
-                pop,
-                scores,
+            tournament_key = lambda i: scores[i]
+        sorted_idx = sorted(range(len(pop)), key=tournament_key)
+
+        learning = use_learned_crossover and gen >= max(1, int(selector_warmup_gens))
+        if learning and gen % selector_update_freq == 0:
+            update_selector(
                 inputs,
                 y,
                 complexity_coef,
@@ -920,7 +796,7 @@ def run_ga(
                 temperature=temperature,
                 heuristic_bias_scale=heuristic_bias_scale,
             )
-        
+
         # track best
         for ind, s in zip(pop, scores):
             if s < best_score:
@@ -929,84 +805,54 @@ def run_ga(
                 r2_val = evaluate_r2(best)
                 if r2_val is not None:
                     best_r2 = r2_val
-        
+
         # Check stopping criterion
         if stopping_threshold is not None and best is not None:
             try:
                 y_pred = best.evaluate(inputs)
                 if not (np.any(np.isinf(y_pred)) or np.any(np.isnan(y_pred))):
                     if stopping_metric == 'mse':
-                        current_mse = float(np.mean((y - y_pred)**2))
-                        if current_mse <= stopping_threshold:
-                            if verbose:
-                                print(f"\nStopping criterion reached at generation {gen+1}")
-                                print(f"MSE: {current_mse:.6g} <= {stopping_threshold}")
-                            break
-                    elif stopping_metric == 'r2':
-                        ss_res = np.sum((y - y_pred)**2)
-                        ss_tot = np.sum((y - np.mean(y))**2)
-                        current_r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
-                        if current_r2 >= stopping_threshold:
-                            if verbose:
-                                print(f"\nStopping criterion reached at generation {gen+1}")
-                                print(f"R²: {current_r2:.6g} >= {stopping_threshold}")
-                            break
+                        value = float(np.mean((y - y_pred) ** 2))
+                        reached = value <= stopping_threshold
+                    else:
+                        value = r2_score_of(y, y_pred) or 0.0
+                        reached = stopping_metric == 'r2' and value >= stopping_threshold
+                    if reached:
+                        if verbose:
+                            print(f"\nStopping criterion reached at generation {gen+1}: {stopping_metric} = {value:.6g}")
+                        break
             except Exception:
-                pass  # Continue if evaluation fails
-        
+                pass
+
         next_pop = []
-        # elitism
-        if use_pareto and pareto_ranks is not None and pareto_crowding is not None:
-            sorted_idx = sorted(
-                range(len(pop)),
-                key=lambda i: (pareto_ranks[i], -pareto_crowding[i], scores[i])
-            )
-        else:
-            sorted_idx = sorted(range(len(pop)), key=lambda i: scores[i])
-        # Optimize constants only for elites (optional, periodic)
+        # elitism, optionally optimizing the elites' constants
         optimize_elites = opt_constants and gen > 0 and gen % const_opt_freq == 0
         if optimize_elites and verbose:
             print(f"\nOptimizing constants for elites at generation {gen+1}...")
         for i in range(elitism):
             elite = pop[sorted_idx[i]].clone()
             if optimize_elites:
-                elite = optimize_constants(
-                    elite,
-                    inputs,
-                    y,
-                    method=const_opt_method,
-                    maxiter=const_opt_maxiter,
-                )
+                elite = optimize_constants(elite, inputs, y, method=const_opt_method, maxiter=const_opt_maxiter)
             if simplify_new_genomes:
                 elite = simplify_node_with_timeout(elite, simplify_timeout)
             next_pop.append(elite)
+
         # produce rest
         while len(next_pop) < pop_size:
-            use_learned_now = use_learned_crossover and gen >= max(1, int(selector_warmup_gens))
             if random.random() < crossover_rate:
-                try:
-                    if use_pareto and pareto_ranks is not None and pareto_crowding is not None:
-                        parent1 = tournament_select_pareto(pop, pareto_ranks, pareto_crowding, scores, tournament_k)
-                    else:
-                        parent1 = tournament_select(pop, scores, tournament_k)
-                except RecursionError:
-                    parent1 = random.choice(pop).clone()
-                try:
-                    if use_pareto and pareto_ranks is not None and pareto_crowding is not None:
-                        parent2 = tournament_select_pareto(pop, pareto_ranks, pareto_crowding, scores, tournament_k)
-                    else:
-                        parent2 = tournament_select(pop, scores, tournament_k)
-                except RecursionError:
-                    parent2 = random.choice(pop).clone()
-                child1, child2, history_idx = learned_subtree_crossover(
+                i1 = tournament_pick_index(len(pop), tournament_key, tournament_k)
+                parent1 = pop[i1].clone()
+                i2 = tournament_pick_index(len(pop), tournament_key, tournament_k)
+                parent2 = pop[i2].clone()
+                child1, child2, _ = learned_subtree_crossover(
                     parent1,
                     parent2,
-                    use_learned=use_learned_now,
+                    use_learned=learning,
                     temperature=temperature,
                     record_gen=gen,
                     heuristic_bias_scale=heuristic_bias_scale,
+                    parent_scores=(scores[i1], scores[i2]),
                 )
-                # optionally mutate children
                 if random.random() < mutation_rate:
                     child1 = subtree_mutation(child1, max_depth, prob_const, const_range)
                 if random.random() < mutation_rate:
@@ -1014,26 +860,15 @@ def run_ga(
                 if simplify_new_genomes:
                     child1 = simplify_node_with_timeout(child1, simplify_timeout)
                     child2 = simplify_node_with_timeout(child2, simplify_timeout)
-                # Reject bloated offspring: fall back to the parent when depth exceeds max_depth
                 if random.random() < add_term_prob:
                     child1 = add_term_mutation(child1)
                 if random.random() < add_term_prob:
                     child2 = add_term_mutation(child2)
-                if too_big(child1, max_depth):
-                    child1 = parent1.clone()
-                if too_big(child2, max_depth):
-                    child2 = parent2.clone()
-                next_pop.append(child1)
+                next_pop.append(parent1.clone() if too_big(child1, max_depth) else child1)
                 if len(next_pop) < pop_size:
-                    next_pop.append(child2)
+                    next_pop.append(parent2.clone() if too_big(child2, max_depth) else child2)
             else:
-                try:
-                    if use_pareto and pareto_ranks is not None and pareto_crowding is not None:
-                        parent = tournament_select_pareto(pop, pareto_ranks, pareto_crowding, scores, tournament_k)
-                    else:
-                        parent = tournament_select(pop, scores, tournament_k)
-                except RecursionError:
-                    parent = random.choice(pop).clone()
+                parent = pop[tournament_pick_index(len(pop), tournament_key, tournament_k)].clone()
                 child = parent
                 if random.random() < mutation_rate:
                     child = subtree_mutation(child, max_depth, prob_const, const_range)
@@ -1043,36 +878,17 @@ def run_ga(
                     child = simplify_node_with_timeout(child, simplify_timeout)
                 if random.random() < add_term_prob:
                     child = add_term_mutation(child)
-                if too_big(child, max_depth):
-                    child = parent.clone()
-                next_pop.append(child)
+                next_pop.append(parent.clone() if too_big(child, max_depth) else child)
         pop = next_pop
 
         if verbose and ((gen + 1) % print_freq == 0 or gen == 0):
-            # Calculate R² for the best individual
-            try:
-                y_pred_best = best.evaluate(inputs)
-                if not (np.any(np.isinf(y_pred_best)) or np.any(np.isnan(y_pred_best))):
-                    ss_res = np.sum((y - y_pred_best)**2)
-                    ss_tot = np.sum((y - np.mean(y))**2)
-                    r2_best = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
-                    print(f"Gen {gen+1:3d} best MSE+penalty: {best_score:.6g} R²: {r2_best:.6f} expr: {best.to_string()}")
-                else:
-                    print(f"Gen {gen+1:3d} best MSE+penalty: {best_score:.6g} expr: {best.to_string()}")
-            except Exception:
-                print(f"Gen {gen+1:3d} best MSE+penalty: {best_score:.6g} expr: {best.to_string()}")
+            r2_best = evaluate_r2(best)
+            r2_text = f" R²: {r2_best:.6f}" if r2_best is not None else ""
+            print(f"Gen {gen+1:3d} best MSE+penalty: {best_score:.6g}{r2_text} expr: {best.to_string()}")
 
         if metrics_callback is not None and best is not None:
-            try:
-                y_pred = np.asarray(best.evaluate(inputs), dtype=float)
-                if np.any(np.isnan(y_pred)) or np.any(np.isinf(y_pred)):
-                    raise ValueError("Invalid predictions for metrics callback.")
-                ss_res = float(np.sum((y - y_pred) ** 2))
-                ss_tot = float(np.sum((y - np.mean(y)) ** 2))
-                r2 = 1.0 - ss_res / ss_tot if ss_tot else float("nan")
-            except Exception:
-                r2 = float("nan")
-            metrics_callback(gen, float(r2))
+            r2 = evaluate_r2(best)
+            metrics_callback(gen, float(r2) if r2 is not None else float("nan"))
 
     if best is not None and best_r2 is None:
         best_r2 = evaluate_r2(best)
@@ -1323,16 +1139,17 @@ def random_quadratic(n_terms: int) -> Node:
     return tree
 
 
-# Fitness: mean squared error + complexity penalty
-def fitness(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray, 
-            complexity_coef=1e-3, inclusion_coef=1.0) -> float:
+def score_individual(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray,
+                     complexity_coef=1e-3, inclusion_coef=1.0) -> Tuple[float, Tuple[float, float]]:
+    """Evaluate once; return (fitness, pareto objectives (error_with_inclusion, size))."""
+    size = ind.size()
     try:
         y_pred = predict(ind, inputs, y)
         if np.any(np.isinf(y_pred)) or np.any(np.isnan(y_pred)):
-            return 1e6 + ind.size()
+            return 1e6 + size, (1e6 + size, float(size))
         mse = float(np.mean((y - y_pred)**2))
     except Exception:
-        return 1e6 + ind.size()
+        return 1e6 + size, (1e6 + size, float(size))
     inclusion_penalty = 0.0
     if inclusion_coef:
         used_vars = gather_used_var_names(ind)
@@ -1341,7 +1158,13 @@ def fitness(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray,
         base_pred = ind.evaluate(inputs) if LINEAR_TERMS else y_pred
         missing_vars |= detect_inert_variables(ind, inputs, base_pred, candidate_vars=used_vars)
         inclusion_penalty = inclusion_coef * len(missing_vars)
-    return mse + complexity_coef * ind.size() + inclusion_penalty
+    return mse + complexity_coef * size + inclusion_penalty, (mse + inclusion_penalty, float(size))
+
+
+# Fitness: mean squared error + complexity penalty
+def fitness(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray,
+            complexity_coef=1e-3, inclusion_coef=1.0) -> float:
+    return score_individual(ind, inputs, y, complexity_coef, inclusion_coef)[0]
 
 
 def subtree_mutation(ind: Node, max_depth: int, prob_const=0.3, const_range=(-5, 5)) -> Node:
@@ -1363,114 +1186,64 @@ def learned_subtree_crossover(
     temperature=0.5,
     record_gen: int | None = None,
     heuristic_bias_scale: float = 1.0,
+    parent_scores: Tuple[float, float] | None = None,
 ) -> Tuple[Node, Node, int | None]:
-    """Crossover using learned subtree selection with custom temperature."""
-    global subtree_selector, selector_feature_dim, crossover_history
-    
+    """Swap one subtree between clones of a and b. With use_learned, the crossover points are
+    sampled from the selector's joint pair distribution (or H alone when there is no network);
+    otherwise they are uniform. Learned choices are recorded for the next selector update."""
     a_clone = a.clone()
     b_clone = b.clone()
-    use_selector = use_learned and subtree_selector is not None
-    
-    a_features = None
-    b_features = None
-
-    expected_dim = get_selector_feature_dim()
-    if use_selector and selector_feature_dim is not None and expected_dim != selector_feature_dim:
-        use_selector = False
-        crossover_history.clear()
+    use_selector = use_learned and (subtree_selector is not None or SELECTOR_TYPE == 'heuristic')
 
     if use_selector:
-        a_nodes = collect_nodes_with_features(a_clone)
-        b_nodes = collect_nodes_with_features(b_clone)
-        # Use neural network to select a joint subtree pair.
+        with_dists = isinstance(subtree_selector, PairSelector)
+        a_nodes, a_feats, a_dists = collect_nodes_with_features(a_clone, with_dists)
+        b_nodes, b_feats, b_dists = collect_nodes_with_features(b_clone, with_dists)
         with torch.no_grad():
-            a_features = torch.stack([feat for _, _, _, feat in a_nodes])
-            b_features = torch.stack([feat for _, _, _, feat in b_nodes])
-            try:
-                a_logits, _ = subtree_selector(a_features, return_value=True)
-                b_logits, _ = subtree_selector(b_features, return_value=True)
-
-                pair_logits = a_logits.unsqueeze(1) + b_logits.unsqueeze(0)
-
-                a_type = torch.argmax(a_features[:, :4], dim=1)
-                b_type = torch.argmax(b_features[:, :4], dim=1)
-                type_match = (a_type.unsqueeze(1) == b_type.unsqueeze(0)).to(pair_logits.dtype)
-
-                a_size = a_features[:, 4].unsqueeze(1)
-                b_size = b_features[:, 4].unsqueeze(0)
-                a_depth = a_features[:, 5].unsqueeze(1)
-                b_depth = b_features[:, 5].unsqueeze(0)
-                size_gap = torch.abs(a_size - b_size)
-                depth_gap = torch.abs(a_depth - b_depth)
-
-                a_ops = a_features[:, 10:]
-                b_ops = b_features[:, 10:]
-                if a_ops.numel() > 0 and b_ops.numel() > 0 and a_ops.shape[1] == b_ops.shape[1]:
-                    op_match = a_ops @ b_ops.transpose(0, 1)
-                else:
-                    op_match = torch.zeros_like(pair_logits)
-
-                _bs = float(heuristic_bias_scale)
-                pair_logits = pair_logits + _bs * (0.15 * type_match + 0.20 * op_match - 0.10 * size_gap - 0.08 * depth_gap)
-                safe_temp = max(float(temperature), 1e-6)
-                flat_logits = torch.clamp(pair_logits / safe_temp, -10.0, 10.0).reshape(-1)
-                probs = torch.softmax(flat_logits, dim=0)
-                probs = torch.clamp(probs, min=1e-8)
-                probs = probs / probs.sum()
-
-                flat_idx = int(torch.multinomial(probs, 1).item()) if probs.numel() > 1 else 0
-                num_b = int(b_features.shape[0])
-                a_idx = int(flat_idx // max(num_b, 1))
-                b_idx = int(flat_idx % max(num_b, 1))
-            except Exception as exc:
-                if _is_cuda_oom(exc) and DEVICE.type == 'cuda':
-                    _set_selector_device(torch.device('cpu'))
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                a_idx = random.randint(0, len(a_nodes) - 1)
-                b_idx = random.randint(0, len(b_nodes) - 1)
-        node_a, parent_a, attr_a, _ = a_nodes[a_idx]
-        node_b, parent_b, attr_b, _ = b_nodes[b_idx]
+            flat_logits, _ = pair_distribution(subtree_selector, (a_feats, a_dists), (b_feats, b_dists),
+                                               temperature, heuristic_bias_scale)
+            probs = torch.softmax(flat_logits, dim=0)
+            probs = torch.clamp(probs, min=1e-8)
+            probs = probs / probs.sum()
+            flat_idx = int(torch.multinomial(probs, 1).item()) if probs.numel() > 1 else 0
+        a_idx, b_idx = divmod(flat_idx, len(b_nodes))
+        node_a, parent_a, attr_a = a_nodes[a_idx]
+        node_b, parent_b, attr_b = b_nodes[b_idx]
     else:
-        # Random selection (baseline)
-        a_nodes = collect_nodes_with_parents(a_clone)
-        b_nodes = collect_nodes_with_parents(b_clone)
-        node_a, parent_a, attr_a = random.choice(a_nodes)
-        node_b, parent_b, attr_b = random.choice(b_nodes)
-    
+        node_a, parent_a, attr_a = random.choice(collect_nodes_with_parents(a_clone))
+        node_b, parent_b, attr_b = random.choice(collect_nodes_with_parents(b_clone))
+
     # Swap subtrees
     if parent_a is None:
         new_a = node_b.clone()
     else:
         new_a = a_clone
         replace_child(parent_a, attr_a, node_b.clone())
-    
+
     if parent_b is None:
         new_b = node_a.clone()
     else:
         new_b = b_clone
         replace_child(parent_b, attr_b, node_a.clone())
-    
+
     # Store crossover info for later learning
     history_idx = None
-    if use_selector and a_features is not None and b_features is not None:
+    if use_selector and subtree_selector is not None:
         crossover_history.append({
-            'a_features_all': a_features.cpu(),
-            'b_features_all': b_features.cpu(),
-            'a_idx': a_idx,
-            'b_idx': b_idx,
-            'parents': (a.clone(), b.clone()),
+            'a': (a_feats.cpu(), None if a_dists is None else a_dists.cpu()),
+            'b': (b_feats.cpu(), None if b_dists is None else b_dists.cpu()),
+            'flat_idx': flat_idx,
+            'parents': (a, b),
+            'parent_scores': parent_scores,
             'offspring': (new_a.clone(), new_b.clone()),
             'gen': record_gen,
         })
         history_idx = len(crossover_history) - 1
-    
+
     return new_a, new_b, history_idx
 
 
 def update_selector(
-    pop: List[Node],
-    scores: List[float],
     inputs,
     y,
     complexity_coef=1e-3,
@@ -1484,179 +1257,71 @@ def update_selector(
     temperature: float = 0.5,
     heuristic_bias_scale: float = 1.0,
 ) -> float | None:
-    """Update the selector NN. Returns mean raw reward (positive = selector helped), or None."""
-    global subtree_selector, selector_optimizer, crossover_history
-    
+    """One A2C step on the recent crossovers. Reward = best parent fitness - best child fitness.
+    Returns the mean raw reward (positive = crossovers improved on their parents), or None."""
+    global crossover_history
+
     if not crossover_history or subtree_selector is None:
         return None
-    
-    # Filter history to only include records matching the current feature dimension
-    expected_dim = get_selector_feature_dim()
-    latest_gen = None
-    available_gens = []
-    for record in crossover_history:
-        if 'gen' in record and record['gen'] is not None:
-            available_gens.append(record['gen'])
 
-    if available_gens:
-        latest_gen = max(available_gens)
-        if current_gen is not None:
-            desired_gen = current_gen - 1
-            if desired_gen in available_gens:
-                latest_gen = desired_gen
-
-    min_allowed_gen = None
-    if latest_gen is not None:
-        min_allowed_gen = latest_gen - max(int(recent_gen_window), 0)
-
-    filtered_history = []
-    for record in crossover_history:
-        if record['a_features_all'].dim() != 2 or record['b_features_all'].dim() != 2:
-            continue
-        if record['a_features_all'].size(-1) != expected_dim:
-            continue
-        if record['b_features_all'].size(-1) != expected_dim:
-            continue
-        record_gen = record.get('gen')
-        if latest_gen is not None and record_gen is None:
-            continue
-        if min_allowed_gen is not None and record_gen < min_allowed_gen:
-            continue
-        if latest_gen is not None and record_gen > latest_gen:
-            continue
-        filtered_history.append(record)
-    if not filtered_history:
+    # Train on the previous generation's crossovers (and up to recent_gen_window before it)
+    gens = {record['gen'] for record in crossover_history}
+    latest_gen = current_gen - 1 if current_gen is not None and current_gen - 1 in gens else max(gens)
+    min_gen = latest_gen - max(int(recent_gen_window), 0)
+    history = [r for r in crossover_history if min_gen <= r['gen'] <= latest_gen]
+    if not history:
         crossover_history.clear()
         return None
-
-    if len(filtered_history) < max(1, int(min_history)):
-        crossover_history = filtered_history[-max(1, int(min_history) * 4):]
+    if len(history) < max(1, int(min_history)):
+        crossover_history = history[-max(1, int(min_history)) * 4:]
         return None
 
-    # Evaluate offspring fitness (rewards)
     rewards = []
-
-    for record in filtered_history:
-        parent1, parent2 = record.get('parents', (None, None))
-        child1, child2 = record['offspring']
-
-        if parent1 is not None and parent2 is not None:
-            parent_fit1 = fitness(parent1, inputs, y, complexity_coef, inclusion_coef)
-            parent_fit2 = fitness(parent2, inputs, y, complexity_coef, inclusion_coef)
-            parent_best = min(parent_fit1, parent_fit2)
+    for record in history:
+        if record['parent_scores'] is not None:
+            parent_best = min(record['parent_scores'])
         else:
-            parent_best = sum(scores) / len(scores) if scores else 0.0
-
-        fitness1 = fitness(child1, inputs, y, complexity_coef, inclusion_coef)
-        fitness2 = fitness(child2, inputs, y, complexity_coef, inclusion_coef)
-        reward = parent_best - min(fitness1, fitness2)
-        rewards.append(reward)
-
-    if not rewards:
-        crossover_history.clear()
-        return None
-
+            parent_best = min(fitness(p, inputs, y, complexity_coef, inclusion_coef) for p in record['parents'])
+        child_best = min(fitness(c, inputs, y, complexity_coef, inclusion_coef) for c in record['offspring'])
+        rewards.append(parent_best - child_best)
     mean_reward = float(np.mean(rewards))
-
-    # Convert to tensors
-    try:
-        rewards_tensor = torch.tensor(rewards, dtype=torch.float32, device=DEVICE)
-
-        # Skip update if rewards are all the same or invalid
-        rewards_std = rewards_tensor.std(unbiased=False)
-        if rewards_std < 1e-8 or torch.isnan(rewards_tensor).any():
-            crossover_history.clear()
-            return mean_reward
-
-        normalized_rewards = (rewards_tensor - rewards_tensor.mean()) / (rewards_std + 1e-6)
-        if reward_clip is not None and reward_clip > 0:
-            normalized_rewards = torch.clamp(normalized_rewards, -float(reward_clip), float(reward_clip))
-
-        selected_log_probs = []
-        selected_values = []
-        entropies = []
-
-        for record in filtered_history:
-            a_features = record['a_features_all'].to(DEVICE)
-            b_features = record['b_features_all'].to(DEVICE)
-            a_idx = record['a_idx']
-            b_idx = record['b_idx']
-
-            action_logits_a, values_a = subtree_selector(a_features, return_value=True)
-            action_logits_b, values_b = subtree_selector(b_features, return_value=True)
-
-            pair_logits = action_logits_a.unsqueeze(1) + action_logits_b.unsqueeze(0)
-
-            a_type = torch.argmax(a_features[:, :4], dim=1)
-            b_type = torch.argmax(b_features[:, :4], dim=1)
-            type_match = (a_type.unsqueeze(1) == b_type.unsqueeze(0)).to(pair_logits.dtype)
-
-            a_size = a_features[:, 4].unsqueeze(1)
-            b_size = b_features[:, 4].unsqueeze(0)
-            a_depth = a_features[:, 5].unsqueeze(1)
-            b_depth = b_features[:, 5].unsqueeze(0)
-            size_gap = torch.abs(a_size - b_size)
-            depth_gap = torch.abs(a_depth - b_depth)
-
-            a_ops = a_features[:, 10:]
-            b_ops = b_features[:, 10:]
-            if a_ops.numel() > 0 and b_ops.numel() > 0 and a_ops.shape[1] == b_ops.shape[1]:
-                op_match = a_ops @ b_ops.transpose(0, 1)
-            else:
-                op_match = torch.zeros_like(pair_logits)
-
-            _bs = float(heuristic_bias_scale)
-            pair_logits = pair_logits + _bs * (0.15 * type_match + 0.20 * op_match - 0.10 * size_gap - 0.08 * depth_gap)
-            safe_temp = max(float(temperature), 1e-6)
-            flat_logits = torch.clamp(pair_logits / safe_temp, -10.0, 10.0).reshape(-1)
-            pair_log_probs = torch.log_softmax(flat_logits, dim=0)
-            pair_probs = torch.softmax(flat_logits, dim=0)
-
-            num_b = int(b_features.shape[0])
-            flat_idx = int(a_idx) * max(num_b, 1) + int(b_idx)
-            flat_idx = min(max(flat_idx, 0), pair_log_probs.numel() - 1)
-            selected_log_probs.append(pair_log_probs[flat_idx])
-            entropies.append(-torch.sum(pair_probs * torch.log(pair_probs + 1e-10)))
-
-            if subtree_selector.use_critic and values_a is not None and values_b is not None:
-                selected_values.append((values_a[a_idx] + values_b[b_idx]) / 2.0)
-
-        selected_log_probs = torch.stack(selected_log_probs)
-
-        if subtree_selector.use_critic and selected_values:
-            selected_values = torch.stack(selected_values)
-            advantages = normalized_rewards - selected_values.detach()
-            actor_loss = -torch.mean(selected_log_probs * advantages)
-            critic_loss = torch.mean((normalized_rewards - selected_values) ** 2)
-            critic_weight_local = critic_weight
-        else:
-            actor_loss = -torch.mean(selected_log_probs * normalized_rewards)
-            critic_loss = torch.tensor(0.0, device=DEVICE)
-            critic_weight_local = 0.0
-
-        entropy_weight_local = entropy_weight
-        entropy_loss = -torch.mean(torch.stack(entropies)) if entropies else torch.tensor(0.0, device=DEVICE)
-
-        total_loss = actor_loss + critic_weight_local * critic_loss + entropy_weight_local * entropy_loss
-        
-        # Backpropagation
-        if not torch.isnan(total_loss) and not torch.isinf(total_loss):
-            selector_optimizer.zero_grad()
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(subtree_selector.parameters(), max_norm=1.0)
-            selector_optimizer.step()
-    except Exception as exc:
-        if _is_cuda_oom(exc):
-            if DEVICE.type == 'cuda':
-                _set_selector_device(torch.device('cpu'))
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            crossover_history.clear()
-            return mean_reward
-        raise
-    
-    # Clear history
     crossover_history.clear()
+
+    rewards = torch.tensor(rewards, dtype=torch.float32, device=DEVICE)
+    rewards_std = rewards.std(unbiased=False)
+    if rewards_std < 1e-8 or torch.isnan(rewards).any():
+        return mean_reward
+    rewards = (rewards - rewards.mean()) / (rewards_std + 1e-6)
+    if reward_clip is not None and reward_clip > 0:
+        rewards = torch.clamp(rewards, -float(reward_clip), float(reward_clip))
+
+    log_probs, values, entropies = [], [], []
+    for record in history:
+        a = tuple(None if t is None else t.to(DEVICE) for t in record['a'])
+        b = tuple(None if t is None else t.to(DEVICE) for t in record['b'])
+        flat_logits, flat_values = pair_distribution(subtree_selector, a, b, temperature, heuristic_bias_scale)
+        pair_log_probs = torch.log_softmax(flat_logits, dim=0)
+        pair_probs = torch.softmax(flat_logits, dim=0)
+        log_probs.append(pair_log_probs[record['flat_idx']])
+        entropies.append(-torch.sum(pair_probs * torch.log(pair_probs + 1e-10)))
+        if flat_values is not None:
+            values.append(flat_values[record['flat_idx']])
+    log_probs = torch.stack(log_probs)
+
+    if values:
+        values = torch.stack(values)
+        actor_loss = -torch.mean(log_probs * (rewards - values.detach()))
+        critic_loss = critic_weight * torch.mean((rewards - values) ** 2)
+    else:
+        actor_loss = -torch.mean(log_probs * rewards)
+        critic_loss = 0.0
+    total_loss = actor_loss + critic_loss + entropy_weight * -torch.mean(torch.stack(entropies))
+
+    if torch.isfinite(total_loss):
+        selector_optimizer.zero_grad()
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(subtree_selector.parameters(), max_norm=1.0)
+        selector_optimizer.step()
     return mean_reward
 
 
@@ -1804,9 +1469,6 @@ def example():
         tournament_k=3,
         elitism=2,
         var_names=['x', 'y'],
-        use_transformer=True,
-        transformer_heads=4,
-        transformer_layers=2,
         stopping_metric='mse',
         stopping_threshold=0.01,
         complexity_coef=5e-4,

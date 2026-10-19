@@ -6,7 +6,7 @@ import argparse, csv, glob, importlib, multiprocessing as mp, time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
-import numpy as np, sympy as sp
+import numpy as np, sympy as sp, torch
 from main import run_ga, Node, Const, Var, Unary, Binary
 
 SEED, SAMPLE_SIZE, SEEDS = 1, 512, list(range(30))
@@ -312,6 +312,7 @@ class Task:
     benchmark: str = "nguyen"
 
 def run_single_task(t: Task) -> Dict:
+    torch.set_num_threads(1)  # one thread per worker; the pool already uses every core
     # Select correct specs based on benchmark
     if t.benchmark == "nguyen":
         specs_list = NGUYEN_SPECS
