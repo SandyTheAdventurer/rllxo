@@ -2,6 +2,7 @@
 
 import random
 import collections
+import ctypes
 import operator
 import os
 from typing import Dict, List, Mapping, Tuple
@@ -632,7 +633,11 @@ subtree_selector = None
 selector_optimizer = None
 crossover_history = []
 SELECTOR_TYPE = 'mlp'
-PAIR_BATCH_BUDGET = 1 << 17  # max padded node pairs per batched selector forward pass
+PAIR_BATCH_BUDGET = 1 << 15  # max padded node pairs per batched selector forward pass
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+except OSError:  # not glibc
+    _libc = None
 
 
 def r2_score_of(y: np.ndarray, y_pred: np.ndarray) -> float | None:
@@ -1396,6 +1401,9 @@ def update_selector(
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(subtree_selector.parameters(), max_norm=1.0)
         selector_optimizer.step()
+    # glibc keeps freed tensor memory as a high-water mark; hand it back to the OS
+    if _libc is not None:
+        _libc.malloc_trim(0)
     return mean_reward
 
 

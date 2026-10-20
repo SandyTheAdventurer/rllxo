@@ -99,7 +99,7 @@ def main():
     pa.add_argument("--equations", default="6,7,12,114", help="spec ids; Keijzer ids are offset by 100")
     pa.add_argument("--arms", default=",".join(ARMS))
     pa.add_argument("--seeds", type=int, default=30)
-    pa.add_argument("--jobs", type=int, default=12)
+    pa.add_argument("--jobs", type=int, default=8)
     pa.add_argument("--tag", default="main", help="output file name prefix")
     args = pa.parse_args()
 
