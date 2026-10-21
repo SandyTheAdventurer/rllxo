@@ -1062,7 +1062,8 @@ def run_ga(
             r2 = evaluate_r2(best)
             metrics_callback(gen, float(r2) if r2 is not None else float("nan"))
 
-    if best is not None and best_r2 is None:
+    # best_r2 is only refreshed when the new best evaluates cleanly; report the final best's own
+    if best is not None:
         best_r2 = evaluate_r2(best)
 
     return best, best_r2
@@ -1311,6 +1312,11 @@ def random_quadratic(n_terms: int) -> Node:
     return tree
 
 
+# Fitness of a tree whose output is NaN or inf: above any finite MSE, so invalid trees never beat
+# valid ones (a fixed 1e6 did when the target's variance is large), ordered by size among themselves
+INVALID_SCORE = 1e18
+
+
 def score_individual(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray,
                      complexity_coef=1e-3, inclusion_coef=1.0) -> Tuple[float, Tuple[float, float]]:
     """Evaluate once; return (fitness, pareto objectives (error_with_inclusion, size))."""
@@ -1318,10 +1324,10 @@ def score_individual(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray,
     try:
         y_pred = predict(ind, inputs, y)
         if np.any(np.isinf(y_pred)) or np.any(np.isnan(y_pred)):
-            return 1e6 + size, (1e6 + size, float(size))
+            return INVALID_SCORE + size, (INVALID_SCORE + size, float(size))
         mse = float(np.mean((y - y_pred)**2))
     except Exception:
-        return 1e6 + size, (1e6 + size, float(size))
+        return INVALID_SCORE + size, (INVALID_SCORE + size, float(size))
     inclusion_penalty = 0.0
     if inclusion_coef:
         used_vars = gather_used_var_names(ind)

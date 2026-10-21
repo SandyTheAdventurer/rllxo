@@ -47,6 +47,12 @@ the setup for every benchmark and starts again from seed 0; its results are in v
   - selector warmup 30 -> 10 generations (chosen after seeing SRSD seeds 0-6; mlp only);
   - elite constant optimization every 10 -> 5 generations;
   - the cached numpy implementation of the mlp selector's crossover sampling (same distribution).
+  - fixes found in the first minutes of v2 (13 runs, discarded): invalid trees (NaN/inf output)
+    scored 1e6 + size, which beat every valid tree when the target's variance is large (N4: MSE of
+    x is 2.4e7), so the GA could end on an invalid tree; they now score 1e18 + size. run_ga now
+    reports the final best's own train R². Recovery also snaps constants within 0.01% of a small
+    rational times a power of e or pi (e.g. exp(-1)), and within 0.1% of the target's own float
+    constants (Keijzer-6), and treats variables as real (so log(exp(x)) = x).
 - **Equations:** Nguyen 1-12, Keijzer 1-15, SRSD-Feynman medium (40). **Arms:** random, mlp, ssc.
   **Seeds:** 0-29.
 - **New metric:** tree edit distance to the true equation (Zhang-Shasha, both simplified, constants

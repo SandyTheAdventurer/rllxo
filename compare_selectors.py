@@ -130,23 +130,35 @@ def _timeout(*_):
     raise TimeoutError
 
 
+# Small rationals times a nonzero power of e or pi (e.g. exp(-1), pi/2), either sign: function sets
+# with exp and log produce these, which no nearby rational can stand for
+_SPECIAL = [sign * q * base ** k for q in (1, 2, 3, 4, sp.Rational(1, 2), sp.Rational(1, 3), sp.Rational(1, 4))
+            for base in (sp.E, sp.pi) for k in (-2, -1, 1, 2) for sign in (1, -1)]
+
+
 def snap_constants(model: sp.Expr, target: sp.Expr, physical=False) -> sp.Expr:
-    """Evolved constants snapped to nearby simple rationals (within 1e-3); with physical (SRSD),
-    constants within 0.1% of one of the target's constants, possibly times a power of pi, snap
-    to that constant instead."""
+    """Model with real-valued variables and evolved constants snapped: within 0.1% of a float
+    constant of the target to that, within 0.01% of a small rational times a power of e or pi to
+    that, else to a nearby simple rational (within 1e-3). With
+    physical (SRSD), constants within 0.1% of one of the target's constants, possibly times a power
+    of pi, snap to that constant first."""
+    model = model.xreplace({x: sp.Symbol(x.name, real=True) for x in model.free_symbols})
     if physical:
         model = sp.expand_mul(model)
         consts = [sign * c * sp.pi ** k for c in [*target.atoms(sp.Float), sp.Integer(1)]
                   for k in range(-2, 3) for sign in (1, -1)]
-        return model.xreplace({f: snap_constant(f, consts) for f in model.atoms(sp.Float)})
-    return model.xreplace({f: sp.nsimplify(f, rational=True, tolerance=1e-3) for f in model.atoms(sp.Float)})
+        return model.xreplace({f: snap_constant(f, consts, 1e-3) for f in model.atoms(sp.Float)})
+    # Float constants in the target itself (Keijzer-6's Euler-Mascheroni constant) come first
+    own = [sign * c for c in target.atoms(sp.Float) for sign in (1, -1)]
+    return model.xreplace({f: snap_constant(f, own, 1e-3) if any(abs(float(f) - float(c)) <= 1e-3 * abs(float(c))
+                                                                for c in own) else snap_constant(f, _SPECIAL, 1e-4)
+                           for f in model.atoms(sp.Float)})
 
 
-def snap_constant(f: sp.Float, target_consts) -> sp.Expr:
-    """The target's constant (or it times a power of pi, either sign) within 0.1% of f, else the nearby simple
-    rational (within 1e-3)."""
-    for c in target_consts:
-        if abs(float(f) - float(c)) <= 1e-3 * abs(float(c)):
+def snap_constant(f: sp.Float, candidates, rel_tol) -> sp.Expr:
+    """The first candidate within rel_tol (relative) of f, else the nearby simple rational (within 1e-3)."""
+    for c in candidates:
+        if abs(float(f) - float(c)) <= rel_tol * abs(float(c)):
             return c
     return sp.nsimplify(f, rational=True, tolerance=1e-3)
 
@@ -158,6 +170,7 @@ def is_recovered(model: sp.Expr, target: sp.Expr, seconds=30, physical=False) ->
     signal.alarm(seconds)
     try:
         model = snap_constants(model, target, physical)
+        target = target.xreplace({x: sp.Symbol(x.name, real=True) for x in target.free_symbols})
         diff = model - target
         # Merge logs (log(a) - log(b) -> log(a/b)), which plain simplify won't do without sign assumptions
         return sp.simplify(diff) == 0 or sp.simplify(sp.logcombine(sp.expand_log(diff, force=True), force=True)) == 0
@@ -236,7 +249,7 @@ def run_task(task):
         with np.errstate(all="ignore"):
             pred = scale * best.evaluate({n: X_test[:, i] for i, n in enumerate(names)})
         ss_tot = np.sum((y_test - y_test.mean()) ** 2)
-        row.update(train_r2=float(train_r2), size=best.size(), gens_used=len(curve), best_expr=best.to_string(),
+        row.update(train_r2=float("nan") if train_r2 is None else float(train_r2), size=best.size(), gens_used=len(curve), best_expr=best.to_string(),
                    test_r2=float(1 - np.sum((y_test - pred) ** 2) / ss_tot) if np.all(np.isfinite(pred)) else float("nan"))
         row["elapsed_sec"] = round(time.time() - t0, 2)  # GA time only, excludes the recovery check
         model = scale * best.to_sympy()
