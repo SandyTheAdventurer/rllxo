@@ -523,6 +523,50 @@ class PairSelector(nn.Module):
         return logits, self.critic(pooled).expand(-1, h.shape[1]).unsqueeze(-1).expand(-1, -1, g.shape[1])
 
 
+# Fixed operator order, so node features from runs with different operator sets share one layout
+CANONICAL_OPS = ['sin', 'cos', 'exp', 'log', 'sqrt', 'abs', 'tanh', 'add', 'sub', 'mul', 'div', 'pow']
+CANONICAL_FEATURE_DIM = 10 + len(CANONICAL_OPS)
+
+
+def canonical_feature_map(ops: List[str], base_dim: int = 10) -> torch.Tensor:
+    """0/1 matrix (base_dim + len(ops), CANONICAL_FEATURE_DIM) taking node features whose operator
+    one-hots follow ops (a run's ALL_UNARY + ALL_BINARY) to the canonical layout."""
+    m = torch.zeros(base_dim + len(ops), CANONICAL_FEATURE_DIM)
+    m[:base_dim, :base_dim] = torch.eye(base_dim)
+    for k, name in enumerate(ops):
+        m[base_dim + k, base_dim + CANONICAL_OPS.index(name)] = 1.0
+    return m
+
+
+def pair_scorer_net(hidden_dim: int = 64) -> nn.Module:
+    return nn.Sequential(nn.Linear(4 * CANONICAL_FEATURE_DIM, hidden_dim), nn.ReLU(),
+                         nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 1))
+
+
+def pair_inputs(fa: torch.Tensor, fb: torch.Tensor) -> torch.Tensor:
+    """[f_a, f_b, f_a*f_b, |f_a-f_b|] for every node pair: (B, La, C), (B, Lb, C) -> (B, La, Lb, 4C)."""
+    fa, fb = fa.unsqueeze(2).expand(-1, -1, fb.shape[1], -1), fb.unsqueeze(1).expand(-1, fa.shape[1], -1, -1)
+    return torch.cat([fa, fb, fa * fb, (fa - fb).abs()], -1)
+
+
+class PretrainedPairScorer(nn.Module):
+    """Frozen pair scorer trained offline (pretrain_selector.py) on crossovers from other
+    equations: logit that a node pair gives a better-than-median crossover in its generation."""
+
+    needs_distances = False
+
+    def __init__(self, path: str, hidden_dim: int = 64):
+        super().__init__()
+        self.net = pair_scorer_net(hidden_dim)
+        self.net.load_state_dict(torch.load(path, map_location="cpu"))
+        self.register_buffer('proj', canonical_feature_map(ALL_UNARY + ALL_BINARY))
+        self.requires_grad_(False)
+        self.to(DEVICE)
+
+    def score_pairs(self, a, b):
+        return self.net(pair_inputs(a.feats @ self.proj, b.feats @ self.proj)).squeeze(-1), None
+
+
 def heuristic_bias(a_feats: torch.Tensor, b_feats: torch.Tensor) -> torch.Tensor:
     """Hand-crafted compatibility H(n_i, m_j) for every node pair of two (batched) parents: (B, La, Lb)."""
     a_type = torch.argmax(a_feats[..., :4], dim=-1)
@@ -671,6 +715,7 @@ def run_ga(
     mlp_dropout=0.0,
     attn_heads=4,
     attn_layers=1,
+    selector_path=None,
     use_critic=True,
     stopping_metric='mse',
     stopping_threshold=None,
@@ -709,8 +754,9 @@ def run_ga(
     target_dimension=None,
 ):
     """Evolve an expression for y. selector_type picks the learned crossover policy:
-    'mlp' (per-node SubtreeSelector), 'pair' (cross-attention PairSelector) or
-    'heuristic' (H alone, no learning). Returns (best_tree, best_r2)."""
+    'mlp' (per-node SubtreeSelector), 'pair' (cross-attention PairSelector), 'pretrained'
+    (frozen PretrainedPairScorer loaded from selector_path) or 'heuristic' (H alone, no learning).
+    Returns (best_tree, best_r2)."""
     global subtree_selector, selector_optimizer, crossover_history, SELECTOR_TYPE, DEVICE
 
     if seed is None:
@@ -766,8 +812,8 @@ def run_ga(
         pop = [simplify_node_with_timeout(ind, simplify_timeout) for ind in pop]
 
     # Initialize the crossover selector
-    if selector_type not in ('mlp', 'pair', 'heuristic'):
-        raise ValueError("selector_type must be 'mlp', 'pair' or 'heuristic'")
+    if selector_type not in ('mlp', 'pair', 'pretrained', 'heuristic'):
+        raise ValueError("selector_type must be 'mlp', 'pair', 'pretrained' or 'heuristic'")
     SELECTOR_TYPE = selector_type
     subtree_selector = selector_optimizer = None
     if use_learned_crossover and selector_type == 'mlp':
@@ -788,7 +834,9 @@ def run_ga(
             mlp_activation=mlp_activation,
             use_critic=use_critic,
         )
-    if subtree_selector is not None:
+    elif use_learned_crossover and selector_type == 'pretrained':
+        subtree_selector = PretrainedPairScorer(selector_path, hidden_dim=mlp_hidden_dim)
+    if subtree_selector is not None and selector_type != 'pretrained':
         selector_optimizer = optim.Adam(subtree_selector.parameters(), lr=selector_lr)
     if verbose:
         print(f"Crossover: {selector_type if use_learned_crossover else 'random'}"
@@ -844,7 +892,7 @@ def run_ga(
         sorted_idx = sorted(range(len(pop)), key=tournament_key)
 
         learning = use_learned_crossover and gen >= max(1, int(selector_warmup_gens))
-        if learning and gen % selector_update_freq == 0:
+        if learning and selector_optimizer is not None and gen % selector_update_freq == 0:
             update_selector(
                 score,
                 critic_weight=critic_weight,
@@ -1293,7 +1341,7 @@ def learned_subtree_crossover(
 
     # Store crossover info for later learning
     history_idx = None
-    if use_selector and subtree_selector is not None:
+    if use_selector and selector_optimizer is not None:
         crossover_history.append({
             'a': (a_feats.cpu(), None if a_dists is None else a_dists.cpu()),
             'b': (b_feats.cpu(), None if b_dists is None else b_dists.cpu()),

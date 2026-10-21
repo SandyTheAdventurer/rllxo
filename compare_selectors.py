@@ -7,6 +7,8 @@ Arms (all share the paper's GA config from nguyen.py):
   mlp_noH    per-node MLP selector, gamma = 0
   pair       cross-attention PairSelector + H
   pair_noH   cross-attention PairSelector, gamma = 0
+  pretrained frozen pair scorer pretrained offline on other equations (pretrain_selector.py)
+  pretrained_T05  the same at sampling temperature 0.5
 
 Per run it records train and held-out test R², exact symbolic recovery, expression size,
 generations used, wall time, and the per-generation best-R² curve.
@@ -26,6 +28,16 @@ ARMS = {
     "mlp_noH": {"selector_type": "mlp", "heuristic_bias_scale": 0.0},
     "pair": {"selector_type": "pair"},
     "pair_noH": {"selector_type": "pair", "heuristic_bias_scale": 0.0},
+    # Frozen scorer from pretrain_selector.py, acting from generation 1 with no H
+    "pretrained": {"selector_type": "pretrained", "selector_path": "results/pretrain/selector.pt",
+                   "selector_warmup_gens": 1, "heuristic_bias_scale": 0.0},
+    "pretrained_T05": {"selector_type": "pretrained", "selector_path": "results/pretrain/selector.pt",
+                       "selector_warmup_gens": 1, "heuristic_bias_scale": 0.0, "temperature": 0.5},
+    # Same, trained to predict that a child beats the better parent (pretrain_selector.py --label improves)
+    "pretrained_imp": {"selector_type": "pretrained", "selector_path": "results/pretrain/selector_improves.pt",
+                       "selector_warmup_gens": 1, "heuristic_bias_scale": 0.0},
+    "pretrained_imp_T2": {"selector_type": "pretrained", "selector_path": "results/pretrain/selector_improves.pt",
+                          "selector_warmup_gens": 1, "heuristic_bias_scale": 0.0, "temperature": 2.0},
 }
 FIELDS = ["arm", "spec_id", "seed", "status", "train_r2", "test_r2", "recovered", "size", "gens_used",
           "elapsed_sec", "best_expr", "error"]

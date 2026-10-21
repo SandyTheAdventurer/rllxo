@@ -21,7 +21,7 @@ def holm(pvals):
 def main(path):
     df = pd.read_csv(path)
     df = df[df.status == "ok"]
-    arms = [a for a in ["random", "heuristic", "mlp", "mlp_noH", "pair", "pair_noH"] if a in set(df.arm)]
+    arms = [a for a in ["random", "heuristic", "mlp", "mlp_noH", "pair", "pair_noH", "pretrained", "pretrained_T05", "pretrained_imp", "pretrained_imp_T2"] if a in set(df.arm)]
     summary = df.groupby(["spec_id", "arm"]).agg(
         n=("seed", "size"), recovery=("recovered", "mean"), train_r2=("train_r2", "mean"),
         test_r2=("test_r2", "mean"), test_r2_median=("test_r2", "median"), test_r2_sd=("test_r2", "std"),
