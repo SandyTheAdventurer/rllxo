@@ -12,6 +12,9 @@ Arms (all share the paper's GA config from nguyen.py):
   pretrained_imp(_T2)  scorer trained to predict a child beating the better parent (temperature 1 / 2)
   imp_mix50/25    that scorer picks the points of 50% / 25% of crossovers, the rest uniform
   ssc        semantic similarity-based crossover (Uy et al., 2011)
+  imp_sem    improvement scorer with the swapped subtrees' semantic distance
+  no_crossover, *_m01  leverage checks (mutation only; mutation rate 0.1)
+  mlp_rank(_novel)  mlp rewarded by the child's population rank (zero for semantically neutral swaps)
 
 Per run it records train and held-out test R², exact symbolic recovery, expression size,
 generations used, wall time, and the per-generation best-R² curve.
@@ -53,6 +56,10 @@ ARMS = {
                 "selector_warmup_gens": 1, "heuristic_bias_scale": 0.0},
     # Leverage checks: no crossover at all (mutation only), and a standard 0.1 mutation rate
     "no_crossover": {"use_learned_crossover": False, "crossover_rate": 0.0},
+    # MLP selector rewarded by the best child's rank in the population instead of its gain over
+    # the parents, optionally with no reward for semantically neutral swaps
+    "mlp_rank": {"selector_type": "mlp", "selector_reward": "rank"},
+    "mlp_rank_novel": {"selector_type": "mlp", "selector_reward": "rank_novel"},
 }
 for _arm in ["random", "mlp", "ssc", "imp_sem"]:
     ARMS[f"{_arm}_m01"] = {**ARMS[_arm], "mutation_rate": 0.1}

@@ -766,6 +766,7 @@ def run_ga(
     selector_path=None,
     selector_mix=1.0,
     ssc_bounds=(1e-4, 0.4),
+    selector_reward='delta',
     use_critic=True,
     stopping_metric='mse',
     stopping_threshold=None,
@@ -807,7 +808,8 @@ def run_ga(
     'mlp' (per-node SubtreeSelector), 'pair' (cross-attention PairSelector), 'pretrained'
     (frozen PretrainedPairScorer loaded from selector_path), 'heuristic' (H alone, no learning)
     or 'ssc' (semantic similarity-based crossover within ssc_bounds). selector_mix is the share of
-    crossovers whose points the selector picks. Returns (best_tree, best_r2)."""
+    crossovers whose points the selector picks. selector_reward is the selector's reward (see
+    update_selector). Returns (best_tree, best_r2)."""
     global subtree_selector, selector_optimizer, crossover_history, SELECTOR_TYPE, DEVICE
     global SELECTOR_MIX, CROSSOVER_INPUTS, SSC_BOUNDS
 
@@ -956,6 +958,8 @@ def run_ga(
                 current_gen=gen,
                 temperature=temperature,
                 heuristic_bias_scale=heuristic_bias_scale,
+                reward_mode=selector_reward,
+                pop_scores=scores,
             )
 
         # track best
@@ -1441,9 +1445,15 @@ def update_selector(
     current_gen: int | None = None,
     temperature: float = 0.5,
     heuristic_bias_scale: float = 1.0,
+    reward_mode: str = 'delta',
+    pop_scores=None,
 ) -> float | None:
-    """One A2C step on the recent crossovers. Reward = best parent fitness - best child fitness.
-    Returns the mean raw reward (positive = crossovers improved on their parents), or None."""
+    """One A2C step on the recent crossovers. Reward (reward_mode):
+    'delta'       best parent fitness - best child fitness
+    'rank'        share of the current population (pop_scores) the best child beats
+    'rank_novel'  'rank', but 0 when the best child computes the same as a parent (mean absolute
+                  output difference below SSC_BOUNDS[0]), so semantically neutral swaps are not rewarded
+    Returns the mean raw reward, or None."""
     global crossover_history
 
     if not crossover_history or subtree_selector is None:
@@ -1467,8 +1477,21 @@ def update_selector(
             parent_best = min(record['parent_scores'])
         else:
             parent_best = min(score_fn(p)[0] for p in record['parents'])
-        child_best = min(score_fn(c)[0] for c in record['offspring'])
-        rewards.append(parent_best - child_best)
+        child_scores = [score_fn(c)[0] for c in record['offspring']]
+        child_best = min(child_scores)
+        if reward_mode == 'delta' or pop_scores is None:
+            rewards.append(parent_best - child_best)
+            continue
+        reward = float(np.mean(np.asarray(pop_scores) > child_best))
+        if reward_mode == 'rank_novel':
+            child = record['offspring'][int(np.argmin(child_scores))]
+            with np.errstate(all='ignore'):
+                out = np.nan_to_num(child.evaluate(CROSSOVER_INPUTS), nan=1e6, posinf=1e6, neginf=-1e6)
+                if any(np.mean(np.abs(out - np.nan_to_num(p.evaluate(CROSSOVER_INPUTS), nan=1e6, posinf=1e6,
+                                                          neginf=-1e6))) < SSC_BOUNDS[0]
+                       for p in record['parents']):
+                    reward = 0.0
+        rewards.append(reward)
     mean_reward = float(np.mean(rewards))
     crossover_history.clear()
 
