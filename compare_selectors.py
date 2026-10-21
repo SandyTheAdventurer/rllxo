@@ -88,9 +88,16 @@ def benchmark_of(spec_id):
 
 
 SRSD_OFFSET = 2000
-# Changes from the paper's config for the revision-1 rerun (results/PROTOCOL.md), on every benchmark;
-# arms that set these keep theirs
-STUDY_OVERRIDES = {"selector_warmup_gens": 10, "const_opt_freq": 5}  # SRSD-Feynman medium equation k (sorted by name) has spec id 2000 + k
+# Revision-1 rerun config on every benchmark (results/PROTOCOL.md): Koza-style GP as in ECJ's koza.params
+# (population 1024, 51 generations, tournament 7, max depth 17, ramped half-and-half 2-6, 90/10
+# internal/leaf points), with ECJ's Koza subtree mutation (grow depth 5) taking the 10% that koza.params
+# gives reproduction (crossover-only runs collapse onto a clone), a single elite, the paper's elite
+# constant optimization, and no Pareto selection. Arms that set these keep theirs
+STUDY_OVERRIDES = {"pop_size": 1024, "gens": 51, "crossover_rate": 0.9, "mutation_rate": 1.0,
+                   "mutation_depth": 5, "mutate_crossover_children": False, "use_pareto": False,
+                   "point_mutation_prob": 0.0, "tournament_k": 7, "elitism": 1, "max_depth": 17,
+                   "init_method": "ramped", "init_min_depth": 2, "max_init_depth": 6, "internal_node_prob": 0.9,
+                   "selector_warmup_gens": 10, "const_opt_freq": 5}  # SRSD-Feynman medium equation k (sorted by name) has spec id 2000 + k
 
 
 def srsd_specs():

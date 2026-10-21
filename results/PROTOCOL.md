@@ -44,8 +44,18 @@ the setup for every benchmark and starts again from seed 0; its results are in v
     the functions in its true answer): Nguyen {+, -, *, /, sin, cos, exp, log} (Uy et al., 2011, as
     listed by Petersen et al., 2021); Keijzer and SRSD the same plus sqrt (Keijzer's original set not
     verified); no pow;
+  - Koza-style GP as in ECJ's koza.params (checked 2026-10-21): population 1024, 51 generations,
+    tournament 7, max depth 17, ramped half-and-half initialization (depth 2-6), crossover 0.9 with
+    Koza node selection (90% internal nodes, 10% leaves) for non-learned crossover and mutation
+    points. The 10% koza.params gives reproduction goes to subtree mutation with grown depth-5
+    subtrees (ECJ's Koza mutation settings) because crossover-only runs collapsed onto one tree's
+    clones in tests; crossover children are not mutated; one elite; no Pareto selection (with these
+    settings it collapsed the population onto 4-5-node trees). Replaces population 300, 200
+    generations, mutation 0.5 with subtrees up to depth 30, tournament 9, 24 elites, max depth 30;
   - selector warmup 30 -> 10 generations (chosen after seeing SRSD seeds 0-6; mlp only);
-  - elite constant optimization every 10 -> 5 generations;
+  - elite constant optimization every 10 -> 5 generations (L-BFGS-B, kept from the paper);
+  - config chosen over 200 generations and over the paper's config on a 90-run random-arm comparison
+    (N6, N7, N12, K4, SRSD i.12.2, seeds 0-5; scratchpad configs.py), before any v2 run of mlp or ssc;
   - the cached numpy implementation of the mlp selector's crossover sampling (same distribution).
   - fixes found in the first minutes of v2 (13 runs, discarded): invalid trees (NaN/inf output)
     scored 1e6 + size, which beat every valid tree when the target's variance is large (N4: MSE of

@@ -727,6 +727,19 @@ CROSSOVER_INPUTS = None  # training inputs, for semantic crossover
 SSC_BOUNDS = (1e-4, 0.4)
 CROSSOVER_SCORE = None  # run_ga's fitness function, for greedy crossover
 GREEDY_TRIALS = 8
+INTERNAL_NODE_PROB = None  # Koza node selection for non-learned crossover and mutation points, or None for uniform
+
+
+def pick_random_node(nodes):
+    """A non-learned crossover or mutation point: uniform, or with INTERNAL_NODE_PROB an internal node
+    with that probability and a leaf otherwise (Koza's node selector)."""
+    if INTERNAL_NODE_PROB is None:
+        return random.choice(nodes)
+    internal = [n for n in nodes if isinstance(n[0], (Unary, Binary))]
+    leaves = [n for n in nodes if not isinstance(n[0], (Unary, Binary))]
+    if internal and (not leaves or random.random() < INTERNAL_NODE_PROB):
+        return random.choice(internal)
+    return random.choice(leaves)
 PAIR_BATCH_BUDGET = 1 << 15  # max padded node pairs per batched selector forward pass
 try:
     _libc = ctypes.CDLL("libc.so.6")
@@ -767,6 +780,11 @@ def run_ga(
     attn_layers=1,
     selector_path=None,
     selector_mix=1.0,
+    internal_node_prob=None,
+    init_method='grow',
+    mutation_depth=None,
+    mutate_crossover_children=True,
+    init_min_depth=2,
     ssc_bounds=(1e-4, 0.4),
     selector_reward='delta',
     greedy_trials=8,
@@ -812,10 +830,14 @@ def run_ga(
     (frozen PretrainedPairScorer loaded from selector_path), 'heuristic' (H alone, no learning)
     or 'ssc' (semantic similarity-based crossover within ssc_bounds), or 'greedy' (an upper bound
     that scores the children of greedy_trials uniform point pairs and keeps the best). selector_mix is the share of
-    crossovers whose points the selector picks. selector_reward is the selector's reward (see
+    crossovers whose points the selector picks. internal_node_prob=0.9 makes
+    non-learned crossover points Koza's (90% internal nodes, 10% leaves) instead of uniform;
+    init_method='ramped' is ramped half-and-half over init_min_depth..max_init_depth.
+    mutation_depth caps mutation subtrees (None draws their depth from 0..max_depth), and with
+    mutate_crossover_children=False crossover and mutation are exclusive operators. selector_reward is the selector's reward (see
     update_selector). Returns (best_tree, best_r2)."""
     global subtree_selector, selector_optimizer, crossover_history, SELECTOR_TYPE, DEVICE
-    global SELECTOR_MIX, CROSSOVER_INPUTS, SSC_BOUNDS, CROSSOVER_SCORE, GREEDY_TRIALS
+    global SELECTOR_MIX, CROSSOVER_INPUTS, SSC_BOUNDS, CROSSOVER_SCORE, GREEDY_TRIALS, INTERNAL_NODE_PROB
 
     if seed is None:
         seed = DEFAULT_SEED
@@ -860,10 +882,16 @@ def run_ga(
     crossover_history = []
 
     init_max_depth = max(1, max_init_depth)
-    pop = [
-        random_tree(max_depth=random.randint(1, init_max_depth), prob_const=prob_const, const_range=const_range)
-        for _ in range(pop_size)
-    ]
+    if init_method == 'ramped':
+        # Ramped half-and-half: depths cycle over init_min_depth..max_init_depth, alternating full and grow
+        depths = list(range(min(init_min_depth, init_max_depth), init_max_depth + 1))
+        pop = [random_tree(depths[(i // 2) % len(depths)], prob_const, const_range, full=i % 2 == 0)
+               for i in range(pop_size)]
+    else:
+        pop = [
+            random_tree(max_depth=random.randint(1, init_max_depth), prob_const=prob_const, const_range=const_range)
+            for _ in range(pop_size)
+        ]
     for i in range(int(quadratic_init_frac * pop_size)):
         pop[i] = random_quadratic(random.randint(2, max(2, max_terms // 2)))
     if simplify_new_genomes:
@@ -875,6 +903,7 @@ def run_ga(
     SELECTOR_TYPE = selector_type
     SELECTOR_MIX, CROSSOVER_INPUTS, SSC_BOUNDS = float(selector_mix), inputs, tuple(ssc_bounds)
     GREEDY_TRIALS = int(greedy_trials)
+    INTERNAL_NODE_PROB = internal_node_prob
     subtree_selector = selector_optimizer = None
     if use_learned_crossover and selector_type == 'mlp':
         subtree_selector = SubtreeSelector(
@@ -1025,10 +1054,10 @@ def run_ga(
                     heuristic_bias_scale=heuristic_bias_scale,
                     parent_scores=(scores[i1], scores[i2]),
                 )
-                if random.random() < mutation_rate:
-                    child1 = subtree_mutation(child1, max_depth, prob_const, const_range)
-                if random.random() < mutation_rate:
-                    child2 = subtree_mutation(child2, max_depth, prob_const, const_range)
+                if mutate_crossover_children and random.random() < mutation_rate:
+                    child1 = subtree_mutation(child1, max_depth, prob_const, const_range, mutation_depth)
+                if mutate_crossover_children and random.random() < mutation_rate:
+                    child2 = subtree_mutation(child2, max_depth, prob_const, const_range, mutation_depth)
                 if simplify_new_genomes:
                     child1 = simplify_node_with_timeout(child1, simplify_timeout)
                     child2 = simplify_node_with_timeout(child2, simplify_timeout)
@@ -1043,7 +1072,7 @@ def run_ga(
                 parent = pop[tournament_pick_index(len(pop), tournament_key, tournament_k)].clone()
                 child = parent
                 if random.random() < mutation_rate:
-                    child = subtree_mutation(child, max_depth, prob_const, const_range)
+                    child = subtree_mutation(child, max_depth, prob_const, const_range, mutation_depth)
                 # small point mutations
                 child = point_mutation(child, prob_change=point_mutation_prob)
                 if simplify_new_genomes:
@@ -1070,15 +1099,17 @@ def run_ga(
 
 
 # Random tree generation with configurable constants
-def random_tree(max_depth: int, prob_const=0.3, const_range=(-5, 5)) -> Node:
+def random_tree(max_depth: int, prob_const=0.3, const_range=(-5, 5), full=False) -> Node:
+    """Random tree of depth <= max_depth (Koza's grow), or with full every branch reaches exactly
+    max_depth (Koza's full)."""
     if max_depth == 0:
         if random.random() < prob_const:
             return Const(random.uniform(*const_range))
         return Var(random.choice(VAR_NAMES))
 
     # Build choices dynamically so empty operator sets don't crash.
-    choices = ["const", "var"]
-    weights = [0.2, 0.2]
+    choices = [] if full and (ALL_UNARY or ALL_BINARY) else ["const", "var"]
+    weights = [0.2] * len(choices)
     if ALL_UNARY:
         choices.append("unary")
         weights.append(0.3)
@@ -1098,12 +1129,12 @@ def random_tree(max_depth: int, prob_const=0.3, const_range=(-5, 5)) -> Node:
                 return Var(random.choice(VAR_NAMES))
             if choice == "unary":
                 func = random.choice(ALL_UNARY)
-                return Unary(func, random_tree(max_depth - 1, prob_const, const_range))
+                return Unary(func, random_tree(max_depth - 1, prob_const, const_range, full))
             func = random.choice(ALL_BINARY)
             return Binary(
                 func,
-                random_tree(max_depth - 1, prob_const, const_range),
-                random_tree(max_depth - 1, prob_const, const_range),
+                random_tree(max_depth - 1, prob_const, const_range, full),
+                random_tree(max_depth - 1, prob_const, const_range, full),
             )
 
     # Fallback (should not hit)
@@ -1345,11 +1376,14 @@ def fitness(ind: Node, inputs: Mapping[str, np.ndarray], y: np.ndarray,
     return score_individual(ind, inputs, y, complexity_coef, inclusion_coef)[0]
 
 
-def subtree_mutation(ind: Node, max_depth: int, prob_const=0.3, const_range=(-5, 5)) -> Node:
+def subtree_mutation(ind: Node, max_depth: int, prob_const=0.3, const_range=(-5, 5), new_depth=None) -> Node:
+    """Replace a random subtree by a grown one of depth <= new_depth, or of a depth drawn from
+    0..max_depth when new_depth is None."""
     ind_clone = ind.clone()
     nodes = collect_nodes_with_parents(ind_clone)
-    node, parent, attr = random.choice(nodes)
-    new_sub = random_tree(max_depth=random.randint(0, max_depth), prob_const=prob_const, const_range=const_range)
+    node, parent, attr = pick_random_node(nodes)
+    depth = random.randint(0, max_depth) if new_depth is None else new_depth
+    new_sub = random_tree(max_depth=depth, prob_const=prob_const, const_range=const_range)
     if parent is None:
         return new_sub
     else:
@@ -1358,12 +1392,13 @@ def subtree_mutation(ind: Node, max_depth: int, prob_const=0.3, const_range=(-5,
 
 
 def semantic_similarity_pick(a_nodes, b_nodes, trials=12):
-    """Semantic similarity-based crossover (Uy et al., 2011): retry uniform point pairs until the
+    """Semantic similarity-based crossover (Uy et al., 2011): retry random point pairs
+    (pick_random_node) until the
     two subtrees' mean absolute output difference on the training inputs lies inside SSC_BOUNDS,
     keeping the last pair after `trials` misses."""
     lower, upper = SSC_BOUNDS
     for _ in range(trials):
-        pa, pb = random.choice(a_nodes), random.choice(b_nodes)
+        pa, pb = pick_random_node(a_nodes), pick_random_node(b_nodes)
         with np.errstate(all='ignore'):
             dist = np.mean(np.abs(pa[0].evaluate(CROSSOVER_INPUTS) - pb[0].evaluate(CROSSOVER_INPUTS)))
         if lower < dist < upper:
@@ -1463,8 +1498,8 @@ def learned_subtree_crossover(
         node_a, parent_a, attr_a = a_nodes[a_idx]
         node_b, parent_b, attr_b = b_nodes[b_idx]
     else:
-        node_a, parent_a, attr_a = random.choice(collect_nodes_with_parents(a_clone))
-        node_b, parent_b, attr_b = random.choice(collect_nodes_with_parents(b_clone))
+        node_a, parent_a, attr_a = pick_random_node(collect_nodes_with_parents(a_clone))
+        node_b, parent_b, attr_b = pick_random_node(collect_nodes_with_parents(b_clone))
 
     # Swap subtrees
     if parent_a is None:
