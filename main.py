@@ -1365,6 +1365,33 @@ def semantic_similarity_pick(a_nodes, b_nodes, trials=12):
     return pa, pb
 
 
+_NODE_SCORES, _NODE_SCORES_GEN = {}, None
+
+
+def node_scores(tree: Node, gen):
+    """(feature tensor, features as numpy, MLP node logits) for a tree, cached for one generation
+    (the selector's weights only change between generations)."""
+    global _NODE_SCORES, _NODE_SCORES_GEN
+    if gen != _NODE_SCORES_GEN or len(_NODE_SCORES) > 5000:
+        _NODE_SCORES, _NODE_SCORES_GEN = {}, gen
+    key = tree.key()
+    if key not in _NODE_SCORES:
+        _, feats, _ = collect_nodes_with_features(tree)
+        with torch.no_grad():
+            logits = subtree_selector(feats).double().cpu().numpy()
+        _NODE_SCORES[key] = (feats.cpu(), feats.cpu().numpy(), logits)
+    return _NODE_SCORES[key]
+
+
+def heuristic_bias_np(a_feats: np.ndarray, b_feats: np.ndarray) -> np.ndarray:
+    """heuristic_bias for one unbatched pair of parents, in numpy: (La, Lb)."""
+    type_match = np.argmax(a_feats[:, :4], 1)[:, None] == np.argmax(b_feats[:, :4], 1)[None, :]
+    size_gap = np.abs(a_feats[:, 4, None] - b_feats[None, :, 4])
+    depth_gap = np.abs(a_feats[:, 5, None] - b_feats[None, :, 5])
+    op_match = a_feats[:, 10:] @ b_feats[:, 10:].T
+    return 0.15 * type_match + 0.20 * op_match - 0.10 * size_gap - 0.08 * depth_gap
+
+
 def learned_subtree_crossover(
     a: Node,
     b: Node,
@@ -1390,6 +1417,23 @@ def learned_subtree_crossover(
     if use_learned and SELECTOR_TYPE == 'ssc':
         (node_a, parent_a, attr_a), (node_b, parent_b, attr_b) = semantic_similarity_pick(
             collect_nodes_with_parents(a_clone), collect_nodes_with_parents(b_clone))
+    elif use_selector and isinstance(subtree_selector, SubtreeSelector):
+        # The MLP's pair logit is a sum of node logits, so each parent's features and node logits
+        # are computed once per generation (tournaments pick the same parents many times) and the
+        # pair distribution is built in numpy; the distribution is the same as pair_distribution's
+        a_nodes, b_nodes = collect_nodes_with_parents(a_clone), collect_nodes_with_parents(b_clone)
+        (a_feats, a_np, a_logits), (b_feats, b_np, b_logits) = (node_scores(t, record_gen) for t in (a, b))
+        a_dists = b_dists = None
+        logits = a_logits[:, None] + b_logits[None, :]
+        if heuristic_bias_scale:
+            logits = logits + float(heuristic_bias_scale) * heuristic_bias_np(a_np, b_np)
+        logits = np.clip(logits / max(float(temperature), 1e-6), -10.0, 10.0).ravel()
+        probs = np.exp(logits - logits.max())
+        cdf = np.cumsum(probs)
+        flat_idx = min(int(np.searchsorted(cdf, random.random() * cdf[-1], side='right')), len(cdf) - 1)
+        a_idx, b_idx = divmod(flat_idx, len(b_nodes))
+        node_a, parent_a, attr_a = a_nodes[a_idx]
+        node_b, parent_b, attr_b = b_nodes[b_idx]
     elif use_selector:
         with_dists = getattr(subtree_selector, 'needs_distances', False)
         with_sem = getattr(subtree_selector, 'needs_semantics', False)
