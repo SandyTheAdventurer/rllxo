@@ -21,7 +21,9 @@ Per run it records train and held-out test R², exact symbolic recovery, express
 generations used, wall time, and the per-generation best-R² curve.
 Rows are appended as they finish, so an interrupted run resumes where it stopped.
 
-Usage: python compare_selectors.py [--equations 6,7,12,114] [--arms ...] [--seeds 30] [--jobs 12]
+Equations: Nguyen 1-12, Keijzer 101-115, SRSD-Feynman medium 2000-2039 (dataset/srsd_medium).
+
+Usage: python compare_selectors.py [--equations 6,7,12,114|srsd] [--arms ...] [--seeds 30] [--jobs 12]
 """
 from __future__ import annotations
 import argparse, csv, json, multiprocessing as mp, signal, time
@@ -72,9 +74,39 @@ FIELDS = ["arm", "spec_id", "seed", "status", "train_r2", "test_r2", "recovered"
 OUT_DIR = Path("results/compare_selectors")
 
 
+SRSD_DIR = Path("dataset/srsd_medium")
+SRSD_OFFSET = 2000  # SRSD-Feynman medium equation k (sorted by name) has spec id 2000 + k
+
+
+def srsd_specs():
+    """SRSD-Feynman medium (Matsubara et al., 2024) from dataset/srsd_medium: the true equation comes
+    from supp_info.json (not the pickles); the unary set is the functions it uses, plus sqrt for
+    half-integer powers."""
+    info = SRSD_DIR / "supp_info.json"
+    if not info.exists():
+        return {}
+    specs = {}
+    for k, (name, v) in enumerate(sorted(json.loads(info.read_text()).items())):
+        target = sp.sympify(v["sympy_eq_str"])
+        unary = {f.func.__name__ for f in target.atoms(sp.Function)}
+        if any(p.exp.is_Rational and not p.exp.is_Integer for p in target.atoms(sp.Pow)):
+            unary.add("sqrt")
+        n_vars = max(int(str(x)[1:]) for x in target.free_symbols) + 1
+        specs[SRSD_OFFSET + k] = {"id": SRSD_OFFSET + k, "name": name, "sympy": target, "srsd": name,
+                                  "variables": [{"name": f"x{i}"} for i in range(n_vars)],
+                                  "allowed_unary": sorted(unary)}
+    return specs
+
+
 def all_specs():
     import nguyen
-    return {**{s["id"]: s for s in nguyen.NGUYEN_SPECS}, **{s["id"] + 100: s for s in nguyen.KEIJZER_SPECS}}
+    return {**{s["id"]: s for s in nguyen.NGUYEN_SPECS}, **{s["id"] + 100: s for s in nguyen.KEIJZER_SPECS},
+            **srsd_specs()}
+
+
+def load_srsd(name, split):
+    data = np.loadtxt(SRSD_DIR / split / f"{name}.txt")
+    return data[:, :-1], data[:, -1]
 
 
 def sample(spec, rng, n):
@@ -88,13 +120,29 @@ def _timeout(*_):
     raise TimeoutError
 
 
-def is_recovered(model: sp.Expr, target: sp.Expr, seconds=30) -> bool:
+def snap_constant(f: sp.Float, target_consts) -> sp.Expr:
+    """The target's constant (or it times a power of pi, either sign) within 0.1% of f, else the nearby simple
+    rational (within 1e-3)."""
+    for c in target_consts:
+        if abs(float(f) - float(c)) <= 1e-3 * abs(float(c)):
+            return c
+    return sp.nsimplify(f, rational=True, tolerance=1e-3)
+
+
+def is_recovered(model: sp.Expr, target: sp.Expr, seconds=30, physical=False) -> bool:
     """Exact symbolic recovery: model - target simplifies to 0 once evolved constants are
-    snapped to nearby simple rationals (within 1e-3)."""
+    snapped to nearby simple rationals (within 1e-3). With physical (SRSD), constants within 0.1%
+    of one of the target's constants, possibly times a power of pi, snap to that constant first."""
     signal.signal(signal.SIGALRM, _timeout)
     signal.alarm(seconds)
     try:
-        model = model.xreplace({f: sp.nsimplify(f, rational=True, tolerance=1e-3) for f in model.atoms(sp.Float)})
+        if physical:
+            model = sp.expand_mul(model)
+            consts = [sign * c * sp.pi ** k for c in [*target.atoms(sp.Float), sp.Integer(1)]
+                      for k in range(-2, 3) for sign in (1, -1)]
+            model = model.xreplace({f: snap_constant(f, consts) for f in model.atoms(sp.Float)})
+        else:
+            model = model.xreplace({f: sp.nsimplify(f, rational=True, tolerance=1e-3) for f in model.atoms(sp.Float)})
         diff = model - target
         # Merge logs (log(a) - log(b) -> log(a/b)), which plain simplify won't do without sign assumptions
         return sp.simplify(diff) == 0 or sp.simplify(sp.logcombine(sp.expand_log(diff, force=True), force=True)) == 0
@@ -114,21 +162,33 @@ def run_task(task):
     curve = []
     t0 = time.time()
     try:
-        # Same training sample as nguyen.py; the test sample is fresh points from the same ranges
-        X, y = sample(spec, np.random.default_rng(seed + spec_id * 1000), nguyen.SAMPLE_SIZE)
-        X_test, y_test = sample(spec, np.random.default_rng(10_000 + seed + spec_id * 1000), nguyen.SAMPLE_SIZE)
+        scale = 1.0
+        if "srsd" in spec:
+            # SAMPLE_SIZE rows of the SRSD train split, scored on its test split. y is divided by its
+            # standard deviation for the GA (outputs range from 1e-80 to 1e90); predictions are rescaled
+            X, y = load_srsd(spec["srsd"], "train")
+            keep = np.random.default_rng(seed + spec_id * 1000).choice(len(y), nguyen.SAMPLE_SIZE, replace=False)
+            X, y = X[keep], y[keep]
+            X_test, y_test = load_srsd(spec["srsd"], "test")
+            scale = float(np.std(y)) or 1.0
+            y = y / scale
+        else:
+            # Same training sample as nguyen.py; the test sample is fresh points from the same ranges
+            X, y = sample(spec, np.random.default_rng(seed + spec_id * 1000), nguyen.SAMPLE_SIZE)
+            X_test, y_test = sample(spec, np.random.default_rng(10_000 + seed + spec_id * 1000), nguyen.SAMPLE_SIZE)
         names = [v["name"] for v in spec["variables"]]
         unary = {n: nguyen._UNARY_REG[n] for n in spec.get("allowed_unary") or [] if n in nguyen._UNARY_REG}
         kw = {**nguyen.ga_config, **nguyen.learned_overrides, **ARMS[arm], "verbose": False, "seed": seed,
               "allow_pow": bool(spec.get("allow_pow", False)),
               "metrics_callback": lambda gen, r2: curve.append(round(r2, 6))}
         best, train_r2 = run_ga(X, y, var_names=names, unary_funcs=unary, **kw)
-        pred = best.evaluate({n: X_test[:, i] for i, n in enumerate(names)})
+        with np.errstate(all="ignore"):
+            pred = scale * best.evaluate({n: X_test[:, i] for i, n in enumerate(names)})
         ss_tot = np.sum((y_test - y_test.mean()) ** 2)
         row.update(train_r2=float(train_r2), size=best.size(), gens_used=len(curve), best_expr=best.to_string(),
                    test_r2=float(1 - np.sum((y_test - pred) ** 2) / ss_tot) if np.all(np.isfinite(pred)) else float("nan"))
         row["elapsed_sec"] = round(time.time() - t0, 2)  # GA time only, excludes the recovery check
-        row["recovered"] = int(is_recovered(best.to_sympy(), spec["sympy"]))
+        row["recovered"] = int(is_recovered(scale * best.to_sympy(), spec["sympy"], physical="srsd" in spec))
     except Exception as exc:
         row.update(status="error", error=repr(exc), elapsed_sec=round(time.time() - t0, 2))
     return row, curve
@@ -136,7 +196,8 @@ def run_task(task):
 
 def main():
     pa = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    pa.add_argument("--equations", default="6,7,12,114", help="spec ids; Keijzer ids are offset by 100")
+    pa.add_argument("--equations", default="6,7,12,114",
+                    help="spec ids; Keijzer ids are offset by 100; 'srsd' = all 40 SRSD-Feynman medium (2000-2039)")
     pa.add_argument("--arms", default=",".join(ARMS))
     pa.add_argument("--seeds", type=int, default=30)
     pa.add_argument("--jobs", type=int, default=8)
@@ -149,7 +210,8 @@ def main():
     if out_csv.exists():
         with open(out_csv) as f:
             done = {(r["arm"], int(r["spec_id"]), int(r["seed"])) for r in csv.DictReader(f)}
-    tasks = [(a, int(e), s) for s in range(args.seeds) for e in args.equations.split(",")
+    equations = [str(k) for k in srsd_specs()] if args.equations == "srsd" else args.equations.split(",")
+    tasks = [(a, int(e), s) for s in range(args.seeds) for e in equations
              for a in args.arms.split(",") if (a, int(e), s) not in done]
     print(f"{len(tasks)} tasks to run ({len(done)} already done), {args.jobs} workers", flush=True)
 
