@@ -9,6 +9,9 @@ Arms (all share the paper's GA config from nguyen.py):
   pair_noH   cross-attention PairSelector, gamma = 0
   pretrained frozen pair scorer pretrained offline on other equations (pretrain_selector.py)
   pretrained_T05  the same at sampling temperature 0.5
+  pretrained_imp(_T2)  scorer trained to predict a child beating the better parent (temperature 1 / 2)
+  imp_mix50/25    that scorer picks the points of 50% / 25% of crossovers, the rest uniform
+  ssc        semantic similarity-based crossover (Uy et al., 2011)
 
 Per run it records train and held-out test R², exact symbolic recovery, expression size,
 generations used, wall time, and the per-generation best-R² curve.
@@ -38,7 +41,21 @@ ARMS = {
                        "selector_warmup_gens": 1, "heuristic_bias_scale": 0.0},
     "pretrained_imp_T2": {"selector_type": "pretrained", "selector_path": "results/pretrain/selector_improves.pt",
                           "selector_warmup_gens": 1, "heuristic_bias_scale": 0.0, "temperature": 2.0},
+    # The improvement scorer picks the points of only a share of crossovers; the rest stay uniform
+    "imp_mix50": {"selector_type": "pretrained", "selector_path": "results/pretrain/selector_improves.pt",
+                  "selector_warmup_gens": 1, "heuristic_bias_scale": 0.0, "selector_mix": 0.5},
+    "imp_mix25": {"selector_type": "pretrained", "selector_path": "results/pretrain/selector_improves.pt",
+                  "selector_warmup_gens": 1, "heuristic_bias_scale": 0.0, "selector_mix": 0.25},
+    # Semantic similarity-based crossover (Uy et al., 2011), the semantic-crossover baseline
+    "ssc": {"selector_type": "ssc", "selector_warmup_gens": 1},
+    # Improvement scorer that also sees the swapped subtrees' semantic distance
+    "imp_sem": {"selector_type": "pretrained", "selector_path": "results/pretrain/selector_improves_sem.pt",
+                "selector_warmup_gens": 1, "heuristic_bias_scale": 0.0},
+    # Leverage checks: no crossover at all (mutation only), and a standard 0.1 mutation rate
+    "no_crossover": {"use_learned_crossover": False, "crossover_rate": 0.0},
 }
+for _arm in ["random", "mlp", "ssc", "imp_sem"]:
+    ARMS[f"{_arm}_m01"] = {**ARMS[_arm], "mutation_rate": 0.1}
 FIELDS = ["arm", "spec_id", "seed", "status", "train_r2", "test_r2", "recovered", "size", "gens_used",
           "elapsed_sec", "best_expr", "error"]
 OUT_DIR = Path("results/compare_selectors")

@@ -1,12 +1,16 @@
 """Summarise compare_selectors.py output: per equation and arm, recovery rate, train/test R²,
-size, generations and wall time, plus Mann-Whitney U tests (Holm-corrected within each
-reference arm) of test R² against the random baseline and the paper's MLP selector.
+size, generations and wall time; pooled recovery with Fisher exact tests; and Mann-Whitney U
+tests (Holm-corrected within each reference arm) of test R² against the random baseline and
+the paper's MLP selector.
 
-Usage: python analyze_selectors.py [results/compare_selectors/main.csv]
+Usage: python analyze_selectors.py [results/compare_selectors/main.csv] [--specs 6,7,12] [--arms a,b,...]
 """
-import sys
+import argparse
 import numpy as np, pandas as pd
-from scipy.stats import mannwhitneyu
+from scipy.stats import fisher_exact, mannwhitneyu
+
+ARMS = ["random", "heuristic", "mlp", "mlp_noH", "pair", "pair_noH", "ssc"]  # display order; others follow
+REFS = ("random", "mlp")
 
 
 def holm(pvals):
@@ -18,10 +22,14 @@ def holm(pvals):
     return adj
 
 
-def main(path):
+def main(path, specs=None, arms=None):
     df = pd.read_csv(path)
     df = df[df.status == "ok"]
-    arms = [a for a in ["random", "heuristic", "mlp", "mlp_noH", "pair", "pair_noH", "pretrained", "pretrained_T05", "pretrained_imp", "pretrained_imp_T2"] if a in set(df.arm)]
+    if specs:
+        df = df[df.spec_id.isin(specs)]
+    if arms:
+        df = df[df.arm.isin(set(arms) | set(REFS))]
+    arms = [a for a in ARMS if a in set(df.arm)] + sorted(set(df.arm) - set(ARMS))
     summary = df.groupby(["spec_id", "arm"]).agg(
         n=("seed", "size"), recovery=("recovered", "mean"), train_r2=("train_r2", "mean"),
         test_r2=("test_r2", "mean"), test_r2_median=("test_r2", "median"), test_r2_sd=("test_r2", "std"),
@@ -30,10 +38,20 @@ def main(path):
     pd.set_option("display.width", 200)
     print(summary.sort_values(["spec_id", "arm"]).round(4).to_string(index=False))
 
-    print("\nOverall recovery rate and mean wall time per arm:")
-    print(df.groupby("arm").agg(recovery=("recovered", "mean"), sec=("elapsed_sec", "mean")).reindex(arms).round(3))
+    pooled = df.groupby("arm").agg(recovered=("recovered", "sum"), runs=("recovered", "size"),
+                                   sec=("elapsed_sec", "mean")).reindex(arms)
+    pooled["recovery"] = pooled.recovered / pooled.runs
+    for ref in REFS:
+        if ref in pooled.index:
+            r = pooled.loc[ref]
+            pooled[f"fisher_p_vs_{ref}"] = [
+                np.nan if a == ref else fisher_exact([[x.recovered, x.runs - x.recovered],
+                                                      [r.recovered, r.runs - r.recovered]])[1]
+                for a, x in pooled.iterrows()]
+    print("\nPooled recovery and mean wall time per arm:")
+    print(pooled.round(3).to_string())
 
-    for ref in ("random", "mlp"):
+    for ref in REFS:
         if ref not in arms:
             continue
         tests = []
@@ -54,4 +72,10 @@ def main(path):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "results/compare_selectors/main.csv")
+    pa = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    pa.add_argument("path", nargs="?", default="results/compare_selectors/main.csv")
+    pa.add_argument("--specs", help="comma-separated spec ids to include")
+    pa.add_argument("--arms", help="comma-separated arms to include (random and mlp are always kept)")
+    args = pa.parse_args()
+    main(args.path, [int(s) for s in args.specs.split(",")] if args.specs else None,
+         args.arms.split(",") if args.arms else None)

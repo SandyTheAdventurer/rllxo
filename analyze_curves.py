@@ -14,7 +14,7 @@ from analyze_selectors import holm
 
 GENS = 200
 CHECKPOINTS = (10, 25, 50, 100, 200)
-ARMS = ["random", "heuristic", "mlp", "mlp_noH", "pair", "pair_noH", "pretrained", "pretrained_T05", "pretrained_imp", "pretrained_imp_T2"]
+ARMS = ["random", "heuristic", "mlp", "mlp_noH", "pair", "pair_noH", "ssc"]  # display order; others follow
 
 
 def load(path):
@@ -50,7 +50,7 @@ def main(path):
         row["auc"] = g.auc.median()
         out.append(row)
     s = pd.DataFrame(out)
-    s["arm"] = pd.Categorical(s.arm, ARMS)
+    s["arm"] = pd.Categorical(s.arm, [a for a in ARMS if a in set(s.arm)] + sorted(set(s.arm) - set(ARMS)))
     pd.set_option("display.width", 220)
     print("Median best training R² at generation k, share of runs reaching a threshold and median generation\n"
           "to reach it, median AUC of log10(1 - R²) (lower is better):")

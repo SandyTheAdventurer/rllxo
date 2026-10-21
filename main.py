@@ -538,9 +538,44 @@ def canonical_feature_map(ops: List[str], base_dim: int = 10) -> torch.Tensor:
     return m
 
 
-def pair_scorer_net(hidden_dim: int = 64) -> nn.Module:
-    return nn.Sequential(nn.Linear(4 * CANONICAL_FEATURE_DIM, hidden_dim), nn.ReLU(),
+SEMANTIC_CHANNELS = 2
+
+
+def pair_scorer_net(hidden_dim: int = 64, semantic: bool = False) -> nn.Module:
+    in_dim = 4 * CANONICAL_FEATURE_DIM + (SEMANTIC_CHANNELS if semantic else 0)
+    return nn.Sequential(nn.Linear(in_dim, hidden_dim), nn.ReLU(),
                          nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, 1))
+
+
+def semantic_channels(ssd: torch.Tensor) -> torch.Tensor:
+    """Pair inputs from the semantic distance of two subtrees (mean absolute output difference):
+    scaled log distance, and whether the two are semantically identical. (...) -> (..., 2)."""
+    return torch.stack([torch.log10(ssd + 1e-6).clamp(-6, 6) / 6, (ssd < 1e-4).to(ssd.dtype)], -1)
+
+
+def subtree_semantics(root: Node, inputs: Mapping[str, np.ndarray]) -> torch.Tensor:
+    """Outputs of every subtree on the inputs, in pre-order (collect_nodes_with_parents order):
+    (N, n_points) float32, non-finite values replaced by 1e6. One bottom-up pass."""
+    out = []
+
+    def visit(n):
+        i = len(out)
+        out.append(None)
+        if isinstance(n, Unary):
+            v = UNARY_FUNCS[n.func_name](visit(n.child))
+        elif isinstance(n, Binary):
+            left = visit(n.left)
+            v = BINARY_FUNCS[n.func_name](left, visit(n.right))
+        else:
+            v = n.evaluate(inputs)
+        out[i] = v
+        return v
+
+    with np.errstate(all='ignore'):
+        visit(root)
+        sem = np.stack([np.broadcast_to(np.asarray(v, dtype=float), out[0].shape) for v in out])
+    sem = np.where(np.isfinite(sem), np.clip(sem, -1e6, 1e6), 1e6)
+    return torch.as_tensor(sem, dtype=torch.float32)
 
 
 def pair_inputs(fa: torch.Tensor, fb: torch.Tensor) -> torch.Tensor:
@@ -551,20 +586,27 @@ def pair_inputs(fa: torch.Tensor, fb: torch.Tensor) -> torch.Tensor:
 
 class PretrainedPairScorer(nn.Module):
     """Frozen pair scorer trained offline (pretrain_selector.py) on crossovers from other
-    equations: logit that a node pair gives a better-than-median crossover in its generation."""
+    equations: logit that a node pair gives a good crossover (the label it was trained on). A
+    scorer trained with semantic channels also sees the two subtrees' semantic distance."""
 
     needs_distances = False
 
     def __init__(self, path: str, hidden_dim: int = 64):
         super().__init__()
-        self.net = pair_scorer_net(hidden_dim)
-        self.net.load_state_dict(torch.load(path, map_location="cpu"))
+        state = torch.load(path, map_location="cpu")
+        self.needs_semantics = state['0.weight'].shape[1] > 4 * CANONICAL_FEATURE_DIM
+        self.net = pair_scorer_net(hidden_dim, semantic=self.needs_semantics)
+        self.net.load_state_dict(state)
         self.register_buffer('proj', canonical_feature_map(ALL_UNARY + ALL_BINARY))
         self.requires_grad_(False)
         self.to(DEVICE)
 
     def score_pairs(self, a, b):
-        return self.net(pair_inputs(a.feats @ self.proj, b.feats @ self.proj)).squeeze(-1), None
+        x = pair_inputs(a.feats @ self.proj, b.feats @ self.proj)
+        if self.needs_semantics:
+            ssd = torch.cdist(a.sem, b.sem, p=1) / a.sem.shape[-1]
+            x = torch.cat([x, semantic_channels(ssd)], -1)
+        return self.net(x).squeeze(-1), None
 
 
 def heuristic_bias(a_feats: torch.Tensor, b_feats: torch.Tensor) -> torch.Tensor:
@@ -578,11 +620,13 @@ def heuristic_bias(a_feats: torch.Tensor, b_feats: torch.Tensor) -> torch.Tensor
     return 0.15 * type_match + 0.20 * op_match - 0.10 * size_gap - 0.08 * depth_gap
 
 
-PairSide = collections.namedtuple("PairSide", ["feats", "valid", "dists"])
+PairSide = collections.namedtuple("PairSide", ["feats", "valid", "dists", "sem"], defaults=(None,))
 
 
-def make_side(feats: List[torch.Tensor], dists: List[torch.Tensor] | None = None) -> PairSide:
-    """Pad one parent side of a batch: feats (B, L, F), valid (B, L) and optional dists (B, L, L)."""
+def make_side(feats: List[torch.Tensor], dists: List[torch.Tensor] | None = None,
+              sem: List[torch.Tensor] | None = None) -> PairSide:
+    """Pad one parent side of a batch: feats (B, L, F), valid (B, L), and optional dists (B, L, L)
+    and subtree outputs sem (B, L, n_points)."""
     lengths = torch.tensor([f.shape[0] for f in feats], device=DEVICE)
     padded = nn.utils.rnn.pad_sequence([f.to(DEVICE) for f in feats], batch_first=True)
     valid = torch.arange(padded.shape[1], device=DEVICE).unsqueeze(0) < lengths.unsqueeze(1)
@@ -591,7 +635,8 @@ def make_side(feats: List[torch.Tensor], dists: List[torch.Tensor] | None = None
         padded_dists = torch.zeros(len(feats), padded.shape[1], padded.shape[1], dtype=torch.long, device=DEVICE)
         for i, dm in enumerate(dists):
             padded_dists[i, :dm.shape[0], :dm.shape[1]] = dm
-    return PairSide(padded, valid, padded_dists)
+    padded_sem = None if sem is None else nn.utils.rnn.pad_sequence([m.to(DEVICE) for m in sem], batch_first=True)
+    return PairSide(padded, valid, padded_dists, padded_sem)
 
 
 def pair_distribution(selector, a: PairSide, b: PairSide, temperature: float, heuristic_bias_scale: float):
@@ -677,6 +722,9 @@ subtree_selector = None
 selector_optimizer = None
 crossover_history = []
 SELECTOR_TYPE = 'mlp'
+SELECTOR_MIX = 1.0  # share of crossovers whose points the selector picks; the rest are uniform
+CROSSOVER_INPUTS = None  # training inputs, for semantic crossover
+SSC_BOUNDS = (1e-4, 0.4)
 PAIR_BATCH_BUDGET = 1 << 15  # max padded node pairs per batched selector forward pass
 try:
     _libc = ctypes.CDLL("libc.so.6")
@@ -716,6 +764,8 @@ def run_ga(
     attn_heads=4,
     attn_layers=1,
     selector_path=None,
+    selector_mix=1.0,
+    ssc_bounds=(1e-4, 0.4),
     use_critic=True,
     stopping_metric='mse',
     stopping_threshold=None,
@@ -755,9 +805,11 @@ def run_ga(
 ):
     """Evolve an expression for y. selector_type picks the learned crossover policy:
     'mlp' (per-node SubtreeSelector), 'pair' (cross-attention PairSelector), 'pretrained'
-    (frozen PretrainedPairScorer loaded from selector_path) or 'heuristic' (H alone, no learning).
-    Returns (best_tree, best_r2)."""
+    (frozen PretrainedPairScorer loaded from selector_path), 'heuristic' (H alone, no learning)
+    or 'ssc' (semantic similarity-based crossover within ssc_bounds). selector_mix is the share of
+    crossovers whose points the selector picks. Returns (best_tree, best_r2)."""
     global subtree_selector, selector_optimizer, crossover_history, SELECTOR_TYPE, DEVICE
+    global SELECTOR_MIX, CROSSOVER_INPUTS, SSC_BOUNDS
 
     if seed is None:
         seed = DEFAULT_SEED
@@ -812,9 +864,10 @@ def run_ga(
         pop = [simplify_node_with_timeout(ind, simplify_timeout) for ind in pop]
 
     # Initialize the crossover selector
-    if selector_type not in ('mlp', 'pair', 'pretrained', 'heuristic'):
-        raise ValueError("selector_type must be 'mlp', 'pair', 'pretrained' or 'heuristic'")
+    if selector_type not in ('mlp', 'pair', 'pretrained', 'heuristic', 'ssc'):
+        raise ValueError("selector_type must be 'mlp', 'pair', 'pretrained', 'heuristic' or 'ssc'")
     SELECTOR_TYPE = selector_type
+    SELECTOR_MIX, CROSSOVER_INPUTS, SSC_BOUNDS = float(selector_mix), inputs, tuple(ssc_bounds)
     subtree_selector = selector_optimizer = None
     if use_learned_crossover and selector_type == 'mlp':
         subtree_selector = SubtreeSelector(
@@ -1287,6 +1340,20 @@ def subtree_mutation(ind: Node, max_depth: int, prob_const=0.3, const_range=(-5,
         return ind_clone
 
 
+def semantic_similarity_pick(a_nodes, b_nodes, trials=12):
+    """Semantic similarity-based crossover (Uy et al., 2011): retry uniform point pairs until the
+    two subtrees' mean absolute output difference on the training inputs lies inside SSC_BOUNDS,
+    keeping the last pair after `trials` misses."""
+    lower, upper = SSC_BOUNDS
+    for _ in range(trials):
+        pa, pb = random.choice(a_nodes), random.choice(b_nodes)
+        with np.errstate(all='ignore'):
+            dist = np.mean(np.abs(pa[0].evaluate(CROSSOVER_INPUTS) - pb[0].evaluate(CROSSOVER_INPUTS)))
+        if lower < dist < upper:
+            break
+    return pa, pb
+
+
 def learned_subtree_crossover(
     a: Node,
     b: Node,
@@ -1301,17 +1368,24 @@ def learned_subtree_crossover(
     otherwise they are uniform. Learned choices are recorded for the next selector update."""
     a_clone = a.clone()
     b_clone = b.clone()
-    use_selector = use_learned and (subtree_selector is not None or SELECTOR_TYPE == 'heuristic')
+    use_selector = (use_learned and (subtree_selector is not None or SELECTOR_TYPE == 'heuristic')
+                    and (SELECTOR_MIX >= 1.0 or random.random() < SELECTOR_MIX))
 
-    if use_selector:
+    if use_learned and SELECTOR_TYPE == 'ssc':
+        (node_a, parent_a, attr_a), (node_b, parent_b, attr_b) = semantic_similarity_pick(
+            collect_nodes_with_parents(a_clone), collect_nodes_with_parents(b_clone))
+    elif use_selector:
         with_dists = getattr(subtree_selector, 'needs_distances', False)
+        with_sem = getattr(subtree_selector, 'needs_semantics', False)
         a_nodes, a_feats, a_dists = collect_nodes_with_features(a_clone, with_dists)
         b_nodes, b_feats, b_dists = collect_nodes_with_features(b_clone, with_dists)
         with torch.no_grad():
             flat_logits, _ = pair_distribution(
                 subtree_selector,
-                make_side([a_feats], [a_dists] if with_dists else None),
-                make_side([b_feats], [b_dists] if with_dists else None),
+                make_side([a_feats], [a_dists] if with_dists else None,
+                          [subtree_semantics(a_clone, CROSSOVER_INPUTS)] if with_sem else None),
+                make_side([b_feats], [b_dists] if with_dists else None,
+                          [subtree_semantics(b_clone, CROSSOVER_INPUTS)] if with_sem else None),
                 temperature,
                 heuristic_bias_scale,
             )
