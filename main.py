@@ -1371,7 +1371,10 @@ def update_selector(
         max_a, max_b = max(max_a, la), max(max_b, lb)
     chunks.append(chunk)
 
-    log_probs, values, entropies, chunk_rewards = [], [], [], []
+    # The loss is a mean over records, so each chunk's share is backpropagated as soon as it is
+    # built and its graph freed; holding every chunk's graph for one backward grows with tree bloat
+    selector_optimizer.zero_grad()
+    total_loss, n = 0.0, len(history)
     for chunk in chunks:
         recs = [history[i] for i in chunk]
         a = make_side([r['a'][0] for r in recs], [r['a'][1] for r in recs] if with_dists else None)
@@ -1380,25 +1383,20 @@ def update_selector(
         idx = torch.tensor([[r['a_idx'] * b.feats.shape[1] + r['b_idx']] for r in recs], device=DEVICE)
         pair_log_probs = torch.log_softmax(flat_logits, dim=1)
         pair_probs = torch.softmax(flat_logits, dim=1)
-        log_probs.append(pair_log_probs.gather(1, idx).squeeze(1))
-        entropies.append(-torch.sum(pair_probs * torch.log(pair_probs + 1e-10), dim=1))
+        log_probs = pair_log_probs.gather(1, idx).squeeze(1)
+        entropies = -torch.sum(pair_probs * torch.log(pair_probs + 1e-10), dim=1)
+        chunk_rewards = rewards[chunk]
         if flat_values is not None:
-            values.append(flat_values.gather(1, idx).squeeze(1))
-        chunk_rewards.append(rewards[chunk])
-    log_probs, entropies, rewards = torch.cat(log_probs), torch.cat(entropies), torch.cat(chunk_rewards)
+            values = flat_values.gather(1, idx).squeeze(1)
+            loss = (-torch.sum(log_probs * (chunk_rewards - values.detach()))
+                    + critic_weight * torch.sum((chunk_rewards - values) ** 2))
+        else:
+            loss = -torch.sum(log_probs * chunk_rewards)
+        loss = (loss - entropy_weight * torch.sum(entropies)) / n
+        loss.backward()
+        total_loss += loss.item()
 
-    if values:
-        values = torch.cat(values)
-        actor_loss = -torch.mean(log_probs * (rewards - values.detach()))
-        critic_loss = critic_weight * torch.mean((rewards - values) ** 2)
-    else:
-        actor_loss = -torch.mean(log_probs * rewards)
-        critic_loss = 0.0
-    total_loss = actor_loss + critic_loss + entropy_weight * -torch.mean(entropies)
-
-    if torch.isfinite(total_loss):
-        selector_optimizer.zero_grad()
-        total_loss.backward()
+    if np.isfinite(total_loss):
         torch.nn.utils.clip_grad_norm_(subtree_selector.parameters(), max_norm=1.0)
         selector_optimizer.step()
     # glibc keeps freed tensor memory as a high-water mark; hand it back to the OS
