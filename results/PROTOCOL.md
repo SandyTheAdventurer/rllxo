@@ -33,3 +33,27 @@ None of the selector settings were tuned on these equations, so this is a fresh 
   outcome; wall time. Recovery treats constants within 0.1% of a constant in the true equation
   (times a power of pi, either sign) as that constant.
 - Whatever this shows is what gets reported.
+
+## Revision-1 rerun, v2 (written 2026-10-21, before any v2 run; supersedes the SRSD section above)
+
+The SRSD run above was stopped after 837 runs (seeds 0-6 seen) and is kept as srsd_v1.csv. v2 changes
+the setup for every benchmark and starts again from seed 0; its results are in v2.csv.
+
+- **Changes from the paper's config, for all arms and benchmarks:**
+  - each benchmark's standard function set for every equation (previously each equation got only
+    the functions in its true answer): Nguyen {+, -, *, /, sin, cos, exp, log} (Uy et al., 2011, as
+    listed by Petersen et al., 2021); Keijzer and SRSD the same plus sqrt (Keijzer's original set not
+    verified); no pow;
+  - selector warmup 30 -> 10 generations (chosen after seeing SRSD seeds 0-6; mlp only);
+  - elite constant optimization every 10 -> 5 generations;
+  - the cached numpy implementation of the mlp selector's crossover sampling (same distribution).
+- **Equations:** Nguyen 1-12, Keijzer 1-15, SRSD-Feynman medium (40). **Arms:** random, mlp, ssc.
+  **Seeds:** 0-29.
+- **New metric:** tree edit distance to the true equation (Zhang-Shasha, both simplified, constants
+  snapped as for recovery) and NED = min(1, TED / true tree size) as in SRSD; recovered runs count 0.
+- **Primary outcome**, analysed separately for Nguyen+Keijzer and for SRSD: per-equation median test R²
+  (non-finite or negative counts as 0), mlp vs random, two-sided Wilcoxon signed-rank across equations
+  (ties dropped). **Secondary:** the same paired test on recovery rate, share of runs with test
+  R² >= 0.999 and median NED; pooled recovery (Fisher); ssc vs random and vs mlp; generations to
+  R² >= 0.999; expression size; wall time.
+- Whatever this shows is what gets reported.
