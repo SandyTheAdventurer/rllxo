@@ -725,6 +725,8 @@ SELECTOR_TYPE = 'mlp'
 SELECTOR_MIX = 1.0  # share of crossovers whose points the selector picks; the rest are uniform
 CROSSOVER_INPUTS = None  # training inputs, for semantic crossover
 SSC_BOUNDS = (1e-4, 0.4)
+CROSSOVER_SCORE = None  # run_ga's fitness function, for greedy crossover
+GREEDY_TRIALS = 8
 PAIR_BATCH_BUDGET = 1 << 15  # max padded node pairs per batched selector forward pass
 try:
     _libc = ctypes.CDLL("libc.so.6")
@@ -767,6 +769,7 @@ def run_ga(
     selector_mix=1.0,
     ssc_bounds=(1e-4, 0.4),
     selector_reward='delta',
+    greedy_trials=8,
     use_critic=True,
     stopping_metric='mse',
     stopping_threshold=None,
@@ -807,11 +810,12 @@ def run_ga(
     """Evolve an expression for y. selector_type picks the learned crossover policy:
     'mlp' (per-node SubtreeSelector), 'pair' (cross-attention PairSelector), 'pretrained'
     (frozen PretrainedPairScorer loaded from selector_path), 'heuristic' (H alone, no learning)
-    or 'ssc' (semantic similarity-based crossover within ssc_bounds). selector_mix is the share of
+    or 'ssc' (semantic similarity-based crossover within ssc_bounds), or 'greedy' (an upper bound
+    that scores the children of greedy_trials uniform point pairs and keeps the best). selector_mix is the share of
     crossovers whose points the selector picks. selector_reward is the selector's reward (see
     update_selector). Returns (best_tree, best_r2)."""
     global subtree_selector, selector_optimizer, crossover_history, SELECTOR_TYPE, DEVICE
-    global SELECTOR_MIX, CROSSOVER_INPUTS, SSC_BOUNDS
+    global SELECTOR_MIX, CROSSOVER_INPUTS, SSC_BOUNDS, CROSSOVER_SCORE, GREEDY_TRIALS
 
     if seed is None:
         seed = DEFAULT_SEED
@@ -866,10 +870,11 @@ def run_ga(
         pop = [simplify_node_with_timeout(ind, simplify_timeout) for ind in pop]
 
     # Initialize the crossover selector
-    if selector_type not in ('mlp', 'pair', 'pretrained', 'heuristic', 'ssc'):
-        raise ValueError("selector_type must be 'mlp', 'pair', 'pretrained', 'heuristic' or 'ssc'")
+    if selector_type not in ('mlp', 'pair', 'pretrained', 'heuristic', 'ssc', 'greedy'):
+        raise ValueError("selector_type must be 'mlp', 'pair', 'pretrained', 'heuristic', 'ssc' or 'greedy'")
     SELECTOR_TYPE = selector_type
     SELECTOR_MIX, CROSSOVER_INPUTS, SSC_BOUNDS = float(selector_mix), inputs, tuple(ssc_bounds)
+    GREEDY_TRIALS = int(greedy_trials)
     subtree_selector = selector_optimizer = None
     if use_learned_crossover and selector_type == 'mlp':
         subtree_selector = SubtreeSelector(
@@ -929,6 +934,8 @@ def run_ga(
                 fitness_cache.clear()
             fitness_cache[key] = score_individual(ind, inputs, y, complexity_coef, inclusion_coef)
         return fitness_cache[key]
+
+    CROSSOVER_SCORE = score
 
     best = None
     best_score = float('inf')
@@ -1370,6 +1377,11 @@ def learned_subtree_crossover(
     """Swap one subtree between clones of a and b. With use_learned, the crossover points are
     sampled from the selector's joint pair distribution (or H alone when there is no network);
     otherwise they are uniform. Learned choices are recorded for the next selector update."""
+    if use_learned and SELECTOR_TYPE == 'greedy':
+        # Upper bound on point selection: keep the uniform pair whose better child scores best
+        trials = [learned_subtree_crossover(a, b, use_learned=False) for _ in range(GREEDY_TRIALS)]
+        return min(trials, key=lambda t: min(CROSSOVER_SCORE(t[0])[0], CROSSOVER_SCORE(t[1])[0]))
+
     a_clone = a.clone()
     b_clone = b.clone()
     use_selector = (use_learned and (subtree_selector is not None or SELECTOR_TYPE == 'heuristic')

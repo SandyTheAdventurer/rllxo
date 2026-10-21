@@ -14,6 +14,7 @@ Arms (all share the paper's GA config from nguyen.py):
   ssc        semantic similarity-based crossover (Uy et al., 2011)
   imp_sem    improvement scorer with the swapped subtrees' semantic distance
   no_crossover, *_m01  leverage checks (mutation only; mutation rate 0.1)
+  greedy8/32 upper bound: best of 8 / 32 uniform point pairs by child fitness
   mlp_rank(_novel)  mlp rewarded by the child's population rank (zero for semantically neutral swaps)
 
 Per run it records train and held-out test R², exact symbolic recovery, expression size,
@@ -60,6 +61,9 @@ ARMS = {
     # the parents, optionally with no reward for semantically neutral swaps
     "mlp_rank": {"selector_type": "mlp", "selector_reward": "rank"},
     "mlp_rank_novel": {"selector_type": "mlp", "selector_reward": "rank_novel"},
+    # Upper bound: score the children of k uniform point pairs and keep the best (uses fitness evaluations)
+    "greedy8": {"selector_type": "greedy", "selector_warmup_gens": 1, "greedy_trials": 8},
+    "greedy32": {"selector_type": "greedy", "selector_warmup_gens": 1, "greedy_trials": 32},
 }
 for _arm in ["random", "mlp", "ssc", "imp_sem"]:
     ARMS[f"{_arm}_m01"] = {**ARMS[_arm], "mutation_rate": 0.1}
