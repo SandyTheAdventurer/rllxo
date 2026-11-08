@@ -1,0 +1,13 @@
+# Python 3.14. The numeric libraries are pinned to the versions of the held-out run (results/HELDOUT_PLAN.md).
+# Everything runs on the CPU; the CPU-only torch wheel is enough:
+#   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+numpy==2.5.3
+scipy==1.18.1
+sympy==1.14.0
+torch==2.15.0
+pandas==3.1.1
+tqdm>=4.66
+zss==1.2.0
+six>=1.16
+psutil>=5.9
+huggingface_hub>=0.24

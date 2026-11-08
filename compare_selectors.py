@@ -25,10 +25,19 @@ Rows are appended as they finish, so an interrupted run resumes where it stopped
 
 Equations: Nguyen 1-12, Keijzer 101-115, SRSD-Feynman medium 2000-2039 (dataset/srsd_medium).
 
-Usage: python compare_selectors.py [--equations 6,7,12,114|nguyen,keijzer,srsd] [--arms ...] [--seeds 30] [--jobs 12]
+Usage: python compare_selectors.py [--equations 6,7,12,114|nguyen,keijzer,srsd|dev|heldout] [--arms ...] [--seeds 30] [--jobs 12]
+       python compare_selectors.py --selftest    (six short dev runs printed as JSON, to compare machines)
+
+Runs on Linux, macOS and Windows; see REPRODUCE.md.
 """
 from __future__ import annotations
-import argparse, csv, json, multiprocessing as mp, signal, time
+import os
+# One thread per run, CPU only. Set before numpy and torch load so every platform computes the same way;
+# variables already set in the environment win
+for _k, _v in {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+               "TQDM_DISABLE": "1", "RLLXO_SELECTOR_DEVICE": "cpu"}.items():
+    os.environ.setdefault(_k, _v)
+import argparse, csv, ctypes, json, multiprocessing as mp, signal, threading, time
 from pathlib import Path
 import numpy as np, sympy as sp, torch
 
@@ -189,6 +198,71 @@ def _timeout(*_):
     raise TimeoutError
 
 
+_alarm_state = {"timer": None, "gen": 0, "lock": threading.Lock()}
+
+
+def _async_raise(exc):
+    """Raise exc in the main thread at its next bytecode boundary."""
+    ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(threading.main_thread().ident), ctypes.py_object(exc))
+
+
+def _alarm(seconds):
+    """Raise TimeoutError in the main thread after `seconds` (0 cancels), like signal.alarm with
+    _timeout as the handler. Windows has no SIGALRM, so a timer thread raises it instead; like a
+    signal handler, that only interrupts between bytecodes."""
+    if hasattr(signal, "SIGALRM"):
+        if seconds:
+            signal.signal(signal.SIGALRM, _timeout)
+        signal.alarm(seconds)
+        return
+    st = _alarm_state
+
+    def fire(gen):
+        with st["lock"]:
+            if st["gen"] == gen:  # neither cancelled nor replaced since it was armed
+                st["timer"] = None
+                _async_raise(TimeoutError)
+
+    with st["lock"]:
+        if st["timer"] is not None:
+            st["timer"].cancel()
+            st["timer"] = None
+        st["gen"] += 1
+        if seconds:
+            st["timer"] = threading.Timer(seconds, fire, args=(st["gen"],))
+            st["timer"].daemon = True
+            st["timer"].start()
+
+
+def _limit_memory(nbytes):
+    """Make a run that allocates more than nbytes fail on its own (status error) instead of pushing
+    the machine into swap: RLIMIT_DATA where it exists, else a watchdog thread on the resident set
+    (needs psutil; without it there is no limit)."""
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_DATA, (nbytes, nbytes))
+        return
+    except ImportError:
+        pass
+    try:
+        import psutil
+    except ImportError:
+        return
+    if getattr(_limit_memory, "started", False):
+        return
+    _limit_memory.started = True
+
+    def watch():
+        proc = psutil.Process()
+        while True:
+            time.sleep(0.5)
+            if proc.memory_info().rss > nbytes:
+                _async_raise(MemoryError)
+                time.sleep(5)
+
+    threading.Thread(target=watch, daemon=True).start()
+
+
 # Small rationals times a nonzero power of e or pi (e.g. exp(-1), pi/2), either sign: function sets
 # with exp and log produce these, which no nearby rational can stand for
 _SPECIAL = [sign * q * base ** k for q in (1, 2, 3, 4, sp.Rational(1, 2), sp.Rational(1, 3), sp.Rational(1, 4))
@@ -225,8 +299,7 @@ def snap_constant(f: sp.Float, candidates, rel_tol) -> sp.Expr:
 def is_recovered(model: sp.Expr, target: sp.Expr, seconds=30, physical=False) -> bool:
     """Exact symbolic recovery: model - target simplifies to 0 once evolved constants are
     snapped (snap_constants)."""
-    signal.signal(signal.SIGALRM, _timeout)
-    signal.alarm(seconds)
+    _alarm(seconds)
     try:
         model = snap_constants(model, target, physical)
         target = target.xreplace({x: sp.Symbol(x.name, real=True) for x in target.free_symbols})
@@ -236,7 +309,7 @@ def is_recovered(model: sp.Expr, target: sp.Expr, seconds=30, physical=False) ->
     except Exception:
         return False
     finally:
-        signal.alarm(0)
+        _alarm(0)
 
 
 def _zss_tree(expr: sp.Expr):
@@ -261,14 +334,13 @@ def tree_edit_distance(model: sp.Expr, target: sp.Expr, seconds=30, physical=Fal
     exprs = []
     # The target goes through the same snapping (which expands products) so both share a form
     for e in (snap_constants(model, target, physical), snap_constants(target, target, physical)):
-        signal.signal(signal.SIGALRM, _timeout)
-        signal.alarm(seconds)
+        _alarm(seconds)
         try:
             e = sp.simplify(e)
         except Exception:
             pass
         finally:
-            signal.alarm(0)
+            _alarm(0)
         exprs.append(e)
     ted = int(zss.simple_distance(_zss_tree(exprs[0]), _zss_tree(exprs[1])))
     return ted, float(min(1.0, ted / sum(1 for _ in sp.preorder_traversal(exprs[1]))))
@@ -277,8 +349,7 @@ def tree_edit_distance(model: sp.Expr, target: sp.Expr, seconds=30, physical=Fal
 def run_task(task):
     arm, spec_id, seed = task
     torch.set_num_threads(1)
-    import resource  # a runaway run fails alone instead of pushing the machine into swap
-    resource.setrlimit(resource.RLIMIT_DATA, (3 << 30, 3 << 30))
+    _limit_memory(3 << 30)
     import nguyen
     from main import run_ga
     spec = all_specs()[spec_id]
@@ -331,23 +402,28 @@ def run_task(task):
 def main():
     pa = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     pa.add_argument("--equations", default="6,7,12,114",
-                    help="spec ids (Keijzer offset by 100) or the groups nguyen, keijzer, srsd")
+                    help="spec ids (Keijzer offset by 100) or the groups nguyen, keijzer, srsd, dev, heldout")
     pa.add_argument("--arms", default=",".join(ARMS))
     pa.add_argument("--seeds", type=int, default=30)
     pa.add_argument("--seed0", type=int, default=0)
     pa.add_argument("--jobs", type=int, default=8)
     pa.add_argument("--tag", default="main", help="output file name prefix")
+    pa.add_argument("--selftest", action="store_true", help="run SELFTEST and print one JSON line per run")
     args = pa.parse_args()
+    if args.selftest:
+        return selftest()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out_csv, out_curves = OUT_DIR / f"{args.tag}.csv", OUT_DIR / f"{args.tag}_curves.jsonl"
     done = set()
     if out_csv.exists():
-        with open(out_csv) as f:
+        with open(out_csv, newline="", encoding="utf-8") as f:
             done = {(r["arm"], int(r["spec_id"]), int(r["seed"])) for r in csv.DictReader(f)}
     dev = [6, 7, 12, 114, *range(201, 207), *[301, 302, 303, 304, 305, 307, 308, 309], *range(401, 413)]
     groups = {"dev": [str(k) for k in dev], "nguyen": [str(k) for k in range(1, 13)], "keijzer": [str(k) for k in range(101, 116)],
               "srsd": [str(k) for k in srsd_specs()]}
+    # The held-out test set (results/HELDOUT_PLAN.md): every Nguyen, Keijzer and SRSD-medium equation not used in development
+    groups["heldout"] = [e for g in ("nguyen", "keijzer", "srsd") for e in groups[g] if int(e) not in dev]
     equations = [e for tok in args.equations.split(",") for e in groups.get(tok, [tok])]
     tasks = [(a, int(e), s) for s in range(args.seed0, args.seed0 + args.seeds) for e in equations
              for a in args.arms.split(",") if (a, int(e), s) not in done]
@@ -355,7 +431,7 @@ def main():
 
     new_file = not out_csv.exists()
     t0 = time.time()
-    with open(out_csv, "a", newline="") as fc, open(out_curves, "a") as fj, \
+    with open(out_csv, "a", newline="", encoding="utf-8") as fc, open(out_curves, "a", encoding="utf-8") as fj, \
             mp.get_context("spawn").Pool(args.jobs, maxtasksperchild=12) as pool:
         writer = csv.DictWriter(fc, fieldnames=FIELDS)
         if new_file:
@@ -369,6 +445,19 @@ def main():
             print(f"[{k}/{len(tasks)}] {row['arm']:9s} eq={row['spec_id']:3d} seed={row['seed']:2d} {row['status']} "
                   f"r2={row.get('train_r2', float('nan')):.4f} rec={row.get('recovered', '-')} "
                   f"{row['elapsed_sec']:.0f}s  eta {eta / 60:.0f} min", flush=True)
+
+
+# Fixed development runs (one per arm family). Their output is identical on one platform and library
+# set; across platforms, numpy's sin/cos/exp/log can differ in the last bits, so some runs diverge
+SELFTEST = [("random", 203, 1000), ("ex64_t01", 203, 1000), ("random_x4", 204, 1000), ("a2c_t03", 304, 1000),
+            ("dir_t03", 401, 1000), ("mlp", 12, 1000)]
+
+
+def selftest():
+    for t in SELFTEST:
+        r, _ = run_task(t)
+        print(json.dumps({k: r.get(k) for k in ("arm", "spec_id", "seed", "status", "train_r2", "test_r2", "recovered",
+                                                "ted", "size", "gens_used", "elapsed_sec", "best_expr")}), flush=True)
 
 
 if __name__ == "__main__":
