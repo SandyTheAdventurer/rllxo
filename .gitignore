@@ -16,7 +16,7 @@ desktop.ini
 
 # --- Local folders ---
 papers/
-dataset/
+dataset
 logs/
 shards/
 
