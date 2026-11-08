@@ -73,3 +73,12 @@ the setup for every benchmark and starts again from seed 0; its results are in v
   R² >= 0.999 and median NED; pooled recovery (Fisher); ssc vs random and vs mlp; generations to
   R² >= 0.999; expression size; wall time.
 - Whatever this shows is what gets reported.
+
+## Rollback to the paper's GA parameters (written 2026-11-06)
+
+The Koza-style config above was run on Nguyen and Keijzer only (v2_nguyen.csv, v2_keijzer.csv); SRSD
+was not run under it. compare_selectors.py now uses the paper's parameters again (nguyen.ga_config +
+nguyen.learned_overrides: population 300, 200 generations, tournament 9, 24 elites, mutation 0.5, max
+depth 30, Pareto selection, warmup 30, constant optimization every 10). Kept from v2: per-benchmark
+function sets, the invalid-tree and final-R² fixes, the recovery changes, TED/NED, and the faster mlp
+sampling. This rollback was decided after seeing the v2 Nguyen and Keijzer results.
