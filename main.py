@@ -726,6 +726,7 @@ SELECTOR_MIX = 1.0  # share of crossovers whose points the selector picks; the r
 CROSSOVER_INPUTS = None  # training inputs, for semantic crossover
 SSC_BOUNDS = (1e-4, 0.4)
 CROSSOVER_SCORE = None  # run_ga's fitness function, for greedy crossover
+CROSSOVER_Y = None
 GREEDY_TRIALS = 8
 INTERNAL_NODE_PROB = None  # Koza node selection for non-learned crossover and mutation points, or None for uniform
 
@@ -898,7 +899,7 @@ def run_ga(
         pop = [simplify_node_with_timeout(ind, simplify_timeout) for ind in pop]
 
     # Initialize the crossover selector
-    if selector_type not in ('mlp', 'pair', 'pretrained', 'heuristic', 'ssc', 'greedy'):
+    if selector_type not in ('mlp', 'pair', 'pretrained', 'heuristic', 'ssc', 'greedy', 'sem'):
         raise ValueError("selector_type must be 'mlp', 'pair', 'pretrained', 'heuristic', 'ssc' or 'greedy'")
     SELECTOR_TYPE = selector_type
     SELECTOR_MIX, CROSSOVER_INPUTS, SSC_BOUNDS = float(selector_mix), inputs, tuple(ssc_bounds)
@@ -965,6 +966,8 @@ def run_ga(
         return fitness_cache[key]
 
     CROSSOVER_SCORE = score
+    global CROSSOVER_Y
+    CROSSOVER_Y = y
 
     best = None
     best_score = float('inf')
@@ -1455,7 +1458,23 @@ def learned_subtree_crossover(
     use_selector = (use_learned and (subtree_selector is not None or SELECTOR_TYPE == 'heuristic')
                     and (SELECTOR_MIX >= 1.0 or random.random() < SELECTOR_MIX))
 
-    if use_learned and SELECTOR_TYPE == 'ssc':
+    if use_learned and SELECTOR_TYPE == 'sem':
+        import semx
+        i1, j1, i2, j2 = semx.pick(a, b, record_gen)
+        a_nodes, b_nodes = collect_nodes_with_parents(a_clone), collect_nodes_with_parents(b_clone)
+        ins_b, ins_a = b_nodes[j1][0].clone(), a_nodes[i2][0].clone()
+        na, pa, aa = a_nodes[i1]
+        nb, pb_, ab = b_nodes[j2]
+        if pa is None:
+            new_a = ins_b
+        else:
+            replace_child(pa, aa, ins_b); new_a = a_clone
+        if pb_ is None:
+            new_b = ins_a
+        else:
+            replace_child(pb_, ab, ins_a); new_b = b_clone
+        return new_a, new_b, None
+    elif use_learned and SELECTOR_TYPE == 'ssc':
         (node_a, parent_a, attr_a), (node_b, parent_b, attr_b) = semantic_similarity_pick(
             collect_nodes_with_parents(a_clone), collect_nodes_with_parents(b_clone))
     elif use_selector and isinstance(subtree_selector, SubtreeSelector):
@@ -1468,7 +1487,12 @@ def learned_subtree_crossover(
         logits = a_logits[:, None] + b_logits[None, :]
         if heuristic_bias_scale:
             logits = logits + float(heuristic_bias_scale) * heuristic_bias_np(a_np, b_np)
-        logits = np.clip(logits / max(float(temperature), 1e-6), -10.0, 10.0).ravel()
+        logits = np.clip(logits / max(float(temperature), 1e-6), -10.0, 10.0)
+        import semx
+        sem_bias = semx.bias_grid(a, b) if semx.CFG["bias"] else None
+        if sem_bias is not None:
+            logits = logits + sem_bias
+        logits = logits.ravel()
         probs = np.exp(logits - logits.max())
         cdf = np.cumsum(probs)
         flat_idx = min(int(np.searchsorted(cdf, random.random() * cdf[-1], side='right')), len(cdf) - 1)
@@ -1522,6 +1546,7 @@ def learned_subtree_crossover(
             'b': (b_feats.cpu(), None if b_dists is None else b_dists.cpu()),
             'a_idx': a_idx,
             'b_idx': b_idx,
+            'bias': sem_bias if isinstance(subtree_selector, SubtreeSelector) else None,
             'parents': (a, b),
             'parent_scores': parent_scores,
             'offspring': (new_a.clone(), new_b.clone()),
@@ -1579,6 +1604,9 @@ def update_selector(
         if reward_mode == 'delta' or pop_scores is None:
             rewards.append(parent_best - child_best)
             continue
+        if reward_mode == 'logratio':
+            rewards.append(float(np.clip(np.log10(max(parent_best, 1e-30) / max(child_best, 1e-30)), -1.0, 1.0)))
+            continue
         reward = float(np.mean(np.asarray(pop_scores) > child_best))
         if reward_mode == 'rank_novel':
             child = record['offspring'][int(np.argmin(child_scores))]
@@ -1622,11 +1650,19 @@ def update_selector(
         a = make_side([r['a'][0] for r in recs], [r['a'][1] for r in recs] if with_dists else None)
         b = make_side([r['b'][0] for r in recs], [r['b'][1] for r in recs] if with_dists else None)
         flat_logits, flat_values = pair_distribution(subtree_selector, a, b, temperature, heuristic_bias_scale)
+        if recs[0].get('bias') is not None:
+            La_, Lb_ = a.feats.shape[1], b.feats.shape[1]
+            bias_pad = torch.zeros(len(recs), La_, Lb_, dtype=flat_logits.dtype, device=DEVICE)
+            for r_i, r_ in enumerate(recs):
+                bb = torch.as_tensor(r_['bias'], dtype=flat_logits.dtype, device=DEVICE)
+                bias_pad[r_i, :bb.shape[0], :bb.shape[1]] = bb
+            flat_logits = flat_logits + bias_pad.reshape(len(recs), -1)
         idx = torch.tensor([[r['a_idx'] * b.feats.shape[1] + r['b_idx']] for r in recs], device=DEVICE)
         pair_log_probs = torch.log_softmax(flat_logits, dim=1)
         pair_probs = torch.softmax(flat_logits, dim=1)
         log_probs = pair_log_probs.gather(1, idx).squeeze(1)
         entropies = -torch.sum(pair_probs * torch.log(pair_probs + 1e-10), dim=1)
+        log_probs = torch.nan_to_num(log_probs, nan=0.0, neginf=0.0)
         chunk_rewards = rewards[chunk]
         if flat_values is not None:
             values = flat_values.gather(1, idx).squeeze(1)

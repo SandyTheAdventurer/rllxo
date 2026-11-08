@@ -69,14 +69,42 @@ ARMS = {
     "greedy8": {"selector_type": "greedy", "selector_warmup_gens": 1, "greedy_trials": 8},
     "greedy32": {"selector_type": "greedy", "selector_warmup_gens": 1, "greedy_trials": 32},
 }
+_S = {"selector_type": "sem", "selector_warmup_gens": 1}
+_B = {"selector_type": "mlp", "selector_warmup_gens": 1, "sem_points": 64, "sem_bias": True, "heuristic_bias_scale": 0.0}
+ARMS.update({
+    # dev1
+    "koza": {"use_learned_crossover": False, "internal_node_prob": 0.9},
+    "noop": {**_S, "sem_mode": "none", "sem_points": 128},
+    "ex_t1": {**_S, "sem_mode": "exact", "sem_temp": 0.1, "sem_points": 128},
+    "ex_t03": {**_S, "sem_mode": "exact", "sem_temp": 0.03, "sem_points": 128},
+    "fo_t1": {**_S, "sem_mode": "fo", "sem_temp": 0.1, "sem_points": 128},
+    # dev2
+    "random_x2": {"use_learned_crossover": False, "gens": 400},
+    "random_x4": {"use_learned_crossover": False, "gens": 800},
+    "random_p4": {"use_learned_crossover": False, "pop_size": 1200},
+    "ex64_t1": {**_S, "sem_mode": "exact", "sem_temp": 0.1, "sem_points": 64},
+    "ex64_t03": {**_S, "sem_mode": "exact", "sem_temp": 0.03, "sem_points": 64},
+    "ex64_t01": {**_S, "sem_mode": "exact", "sem_temp": 0.01, "sem_points": 64},
+    "dir_t1": {**_S, "sem_mode": "exact", "sem_temp": 0.1, "sem_directed": True, "sem_points": 64},
+    "dir_t03": {**_S, "sem_mode": "exact", "sem_temp": 0.03, "sem_directed": True, "sem_points": 64},
+    "tabu_t03": {**_S, "sem_mode": "exact", "sem_temp": 0.03, "sem_tabu": True, "sem_points": 64},
+    "dirtabu_t03": {**_S, "sem_mode": "exact", "sem_temp": 0.03, "sem_directed": True, "sem_tabu": True, "sem_points": 64},
+    "mix50_t03": {**_S, "sem_mode": "exact", "sem_temp": 0.03, "sem_mix": 0.5, "sem_points": 64},
+    "fo64_t03": {**_S, "sem_mode": "fo", "sem_temp": 0.03, "sem_points": 64},
+    "a2c_t03": {**_B, "sem_mode": "exact", "sem_temp": 0.03, "selector_reward": "logratio"},
+    "a2c_t03_fast": {**_B, "sem_mode": "exact", "sem_temp": 0.03, "selector_reward": "logratio", "selector_lr": 3e-3, "entropy_weight": 0.01},
+    "a2c_t1_fast": {**_B, "sem_mode": "exact", "sem_temp": 0.1, "selector_reward": "logratio", "selector_lr": 3e-3, "entropy_weight": 0.01},
+    "mlp_fast": {"selector_type": "mlp", "selector_warmup_gens": 1, "selector_reward": "logratio", "selector_lr": 3e-3, "entropy_weight": 0.01},
+})
 for _arm in ["random", "mlp", "ssc", "imp_sem"]:
     ARMS[f"{_arm}_m01"] = {**ARMS[_arm], "mutation_rate": 0.1}
 FIELDS = ["arm", "spec_id", "seed", "status", "train_r2", "test_r2", "recovered", "ted", "ned", "size",
           "gens_used", "elapsed_sec", "best_expr", "error"]
-OUT_DIR = Path("results/compare_selectors")
+ROOT = Path(__file__).resolve().parent
+OUT_DIR = ROOT / "results/compare_selectors"
 
 
-SRSD_DIR = Path("dataset/srsd_medium")
+SRSD_DIR = ROOT / "dataset/srsd_medium"
 # Each benchmark's standard function set, the same for every equation in it: Nguyen's is Uy et al.'s
 # (2011) {+, -, *, /, sin, cos, exp, log}; Keijzer and SRSD add sqrt. No pow anywhere
 NGUYEN_UNARY = ["sin", "cos", "exp", "log"]
@@ -105,10 +133,43 @@ def srsd_specs():
     return specs
 
 
+def dev_specs():
+    """Fresh tuning equations outside every test set: Jin, Neat and SRSD-easy formulas on log-uniform inputs."""
+    out = {}
+    jin = {1: "2.5*x**4 - 1.3*x**3 + 0.5*y**2 - 1.7*y", 2: "8.0*x**2 + 8.0*y**3 - 15.0",
+           3: "0.2*x**3 + 0.5*y**3 - 1.2*y - 0.5*x", 4: "1.5*exp(x) + 5.0*cos(y)", 5: "6.0*sin(x)*cos(y)",
+           6: "1.35*x*y + 5.5*sin((x - 1.0)*(y - 1.0))"}
+    for k, e in jin.items():
+        out[200 + k] = _dev(200 + k, e, {"x": (-3, 3), "y": (-3, 3)})
+    neat = {1: ("x**4 + 3*x**3 + x**2 + x", {"x": (-1, 1)}), 2: ("x**5 + x**4 + x**3 + x**2 + x", {"x": (-1, 1)}),
+            3: ("sin(x**2)*cos(x) - 1", {"x": (-1, 1)}), 4: ("log(x + 1) + log(x**2 + 1)", {"x": (0, 2)}),
+            5: ("2*sin(x)*cos(y)", {"x": (0, 2), "y": (0, 2)}), 7: ("2 - 2.1*cos(9.8*x)*sin(1.3*y)", {"x": (-5, 5), "y": (-5, 5)}),
+            8: ("exp(-(x - 2)**2) / (1.2 + (y - 2.5)**2)", {"x": (0.3, 4), "y": (0.3, 4)}),
+            9: ("1/(1 + x**(-4)) + 1/(1 + y**(-4))", {"x": (-5, 5), "y": (-5, 5)})}
+    for k, (e, r) in neat.items():
+        out[300 + k] = _dev(300 + k, e, r)
+    info = json.loads((ROOT / "dataset/srsd_easy/supp_info.json").read_text())
+    names = ["feynman-i.18.12", "feynman-i.18.16", "feynman-i.26.2", "feynman-i.27.6", "feynman-i.30.5", "feynman-i.47.23",
+             "feynman-ii.2.42", "feynman-ii.15.4", "feynman-ii.38.14", "feynman-ii.10.9", "feynman-iii.15.27", "feynman-ii.34.11"]
+    for k, n in enumerate(names):
+        e = info[n]["sympy_eq_str"]
+        syms = sorted(sp.sympify(e).free_symbols, key=lambda s: int(str(s)[1:]))
+        out[401 + k] = _dev(401 + k, e, {str(s): (0.1, 10.0) for s in syms}, log=True)
+    return out
+
+
+def _dev(i, expr, ranges, log=False):
+    target = sp.sympify(expr)
+    syms = [sp.Symbol(n) for n in ranges]
+    f = sp.lambdify(syms, target, "numpy")
+    return {"id": i, "name": expr, "sympy": target, "func": lambda *c: np.asarray(f(*c), float) * np.ones_like(c[0]),
+            "variables": [{"name": n, "sampler": r, "log": log} for n, r in ranges.items()], "dev_log": log}
+
+
 def all_specs():
     import nguyen
     return {**{s["id"]: s for s in nguyen.NGUYEN_SPECS}, **{s["id"] + 100: s for s in nguyen.KEIJZER_SPECS},
-            **srsd_specs()}
+            **srsd_specs(), **dev_specs()}
 
 
 def load_srsd(name, split):
@@ -117,7 +178,8 @@ def load_srsd(name, split):
 
 
 def sample(spec, rng, n):
-    cols = [rng.uniform(*v["sampler"], size=n) for v in spec["variables"]]
+    cols = [np.exp(rng.uniform(np.log(v["sampler"][0]), np.log(v["sampler"][1]), size=n)) if v.get("log")
+            else rng.uniform(*v["sampler"], size=n) for v in spec["variables"]]
     y = np.asarray(spec["func"](*cols), dtype=float).ravel()
     ok = np.isfinite(y)
     return np.column_stack(cols)[ok], y[ok]
@@ -215,6 +277,8 @@ def tree_edit_distance(model: sp.Expr, target: sp.Expr, seconds=30, physical=Fal
 def run_task(task):
     arm, spec_id, seed = task
     torch.set_num_threads(1)
+    import resource  # a runaway run fails alone instead of pushing the machine into swap
+    resource.setrlimit(resource.RLIMIT_DATA, (3 << 30, 3 << 30))
     import nguyen
     from main import run_ga
     spec = all_specs()[spec_id]
@@ -236,12 +300,17 @@ def run_task(task):
             # Same training sample as nguyen.py; the test sample is fresh points from the same ranges
             X, y = sample(spec, np.random.default_rng(seed + spec_id * 1000), nguyen.SAMPLE_SIZE)
             X_test, y_test = sample(spec, np.random.default_rng(10_000 + seed + spec_id * 1000), nguyen.SAMPLE_SIZE)
+            if spec.get("dev_log"):
+                scale = float(np.std(y)) or 1.0
+                y = y / scale
         names = [v["name"] for v in spec["variables"]]
         unary = {n: nguyen._UNARY_REG[n] for n in OPERATOR_SETS[benchmark_of(spec_id)]}
         kw = {**nguyen.ga_config, **nguyen.learned_overrides,
               **ARMS[arm], "verbose": False, "seed": seed,
               "allow_pow": False,
               "metrics_callback": lambda gen, r2: curve.append(round(r2, 6))}
+        import semx
+        semx.configure(**{k: kw.pop(k) for k in list(kw) if k.startswith("sem_")})
         best, train_r2 = run_ga(X, y, var_names=names, unary_funcs=unary, **kw)
         with np.errstate(all="ignore"):
             pred = scale * best.evaluate({n: X_test[:, i] for i, n in enumerate(names)})
@@ -250,10 +319,10 @@ def run_task(task):
                    test_r2=float(1 - np.sum((y_test - pred) ** 2) / ss_tot) if np.all(np.isfinite(pred)) else float("nan"))
         row["elapsed_sec"] = round(time.time() - t0, 2)  # GA time only, excludes the recovery check
         model = scale * best.to_sympy()
-        row["recovered"] = int(is_recovered(model, spec["sympy"], physical="srsd" in spec))
+        row["recovered"] = int(is_recovered(model, spec["sympy"], physical="srsd" in spec or bool(spec.get("dev_log"))))
         # A recovered model is the true equation, whatever form simplify leaves it in
         row["ted"], row["ned"] = (0, 0.0) if row["recovered"] else \
-            tree_edit_distance(model, spec["sympy"], physical="srsd" in spec)
+            tree_edit_distance(model, spec["sympy"], physical="srsd" in spec or bool(spec.get("dev_log")))
     except Exception as exc:
         row.update(status="error", error=repr(exc), elapsed_sec=round(time.time() - t0, 2))
     return row, curve
@@ -265,6 +334,7 @@ def main():
                     help="spec ids (Keijzer offset by 100) or the groups nguyen, keijzer, srsd")
     pa.add_argument("--arms", default=",".join(ARMS))
     pa.add_argument("--seeds", type=int, default=30)
+    pa.add_argument("--seed0", type=int, default=0)
     pa.add_argument("--jobs", type=int, default=8)
     pa.add_argument("--tag", default="main", help="output file name prefix")
     args = pa.parse_args()
@@ -275,17 +345,18 @@ def main():
     if out_csv.exists():
         with open(out_csv) as f:
             done = {(r["arm"], int(r["spec_id"]), int(r["seed"])) for r in csv.DictReader(f)}
-    groups = {"nguyen": [str(k) for k in range(1, 13)], "keijzer": [str(k) for k in range(101, 116)],
+    dev = [6, 7, 12, 114, *range(201, 207), *[301, 302, 303, 304, 305, 307, 308, 309], *range(401, 413)]
+    groups = {"dev": [str(k) for k in dev], "nguyen": [str(k) for k in range(1, 13)], "keijzer": [str(k) for k in range(101, 116)],
               "srsd": [str(k) for k in srsd_specs()]}
     equations = [e for tok in args.equations.split(",") for e in groups.get(tok, [tok])]
-    tasks = [(a, int(e), s) for s in range(args.seeds) for e in equations
+    tasks = [(a, int(e), s) for s in range(args.seed0, args.seed0 + args.seeds) for e in equations
              for a in args.arms.split(",") if (a, int(e), s) not in done]
     print(f"{len(tasks)} tasks to run ({len(done)} already done), {args.jobs} workers", flush=True)
 
     new_file = not out_csv.exists()
     t0 = time.time()
     with open(out_csv, "a", newline="") as fc, open(out_curves, "a") as fj, \
-            mp.get_context("spawn").Pool(args.jobs, maxtasksperchild=4) as pool:
+            mp.get_context("spawn").Pool(args.jobs, maxtasksperchild=12) as pool:
         writer = csv.DictWriter(fc, fieldnames=FIELDS)
         if new_file:
             writer.writeheader()
