@@ -110,7 +110,7 @@ ARMS.update({
 for _arm in ["random", "mlp", "ssc", "imp_sem"]:
     ARMS[f"{_arm}_m01"] = {**ARMS[_arm], "mutation_rate": 0.1}
 FIELDS = ["arm", "spec_id", "seed", "status", "train_r2", "test_r2", "recovered", "ted", "ned", "size",
-          "gens_used", "elapsed_sec", "best_expr", "error"]
+          "gens_used", "elapsed_sec", "best_expr", "error", "test_r2_orig"]
 ROOT = Path(__file__).resolve().parent
 OUT_DIR = ROOT / "results/compare_selectors"
 
@@ -124,6 +124,45 @@ OPERATOR_SETS = {"nguyen": NGUYEN_UNARY, "keijzer": NGUYEN_UNARY + ["sqrt"], "sr
 
 def benchmark_of(spec_id):
     return "nguyen" if spec_id < 100 else "keijzer" if spec_id < 1000 else "srsd"
+
+
+# The original Nguyen protocol (Uy et al., 2011; as tabulated by Petersen et al., 2021): 20 training points
+# from these ranges. compare_selectors normally uses 512 points from the wider ranges in nguyen.py.
+# --protocol orig switches to these for Nguyen; the test sample is 512 fresh points from the same ranges
+NGUYEN_ORIG_RANGES = {**{k: [(-1.0, 1.0)] for k in range(1, 7)}, 7: [(0.0, 2.0)], 8: [(0.0, 4.0)],
+                      **{k: [(0.0, 1.0), (0.0, 1.0)] for k in range(9, 13)}}
+NGUYEN_ORIG_POINTS = 20
+
+
+def _grid(*axes):
+    """Every combination of the given 1-D point sets, one column per variable."""
+    return np.column_stack([g.ravel() for g in np.meshgrid(*axes, indexing="ij")])
+
+
+def _even(a, b, step):
+    return np.linspace(a, b, int(round((b - a) / step)) + 1)
+
+
+def keijzer_test_set(k):
+    """Keijzer's (2003) test set for Keijzer-k: mostly a dense grid over the training range; K4 is shifted
+    and K6 extends from x <= 50 to x <= 120, so those two extrapolate."""
+    E = _even
+    if k in (1, 2, 3):
+        return _grid(E(-k, k, 0.001))
+    if k == 4:
+        return _grid(E(0.05, 10.05, 0.05))
+    if k == 5:
+        rng = np.random.default_rng(5)
+        return np.column_stack([rng.uniform(-1, 1, 10000), rng.uniform(1, 2, 10000), rng.uniform(-1, 1, 10000)])
+    if k == 6:
+        return _grid(E(1, 120, 1))
+    if k == 7:
+        return _grid(E(1, 100, 0.1))
+    if k in (8, 9):
+        return _grid(E(0, 100, 0.1))
+    if k == 10:
+        return _grid(E(0, 1, 0.01), E(0, 1, 0.01))
+    return _grid(E(-3, 3, 0.01), E(-3, 3, 0.01))  # 11-15
 
 
 SRSD_OFFSET = 2000  # SRSD-Feynman medium equation k (sorted by name) has spec id 2000 + k
@@ -456,8 +495,12 @@ def run_task(task):
             scale = float(np.std(y)) or 1.0
             y = y / scale
         else:
+            n_train = nguyen.SAMPLE_SIZE
+            if os.environ.get("RLLXO_PROTOCOL") == "orig" and benchmark_of(spec_id) == "nguyen":
+                spec = {**spec, "variables": [{**v, "sampler": r} for v, r in zip(spec["variables"], NGUYEN_ORIG_RANGES[spec_id])]}
+                n_train = NGUYEN_ORIG_POINTS
             # Same training sample as nguyen.py; the test sample is fresh points from the same ranges
-            X, y = sample(spec, np.random.default_rng(seed + spec_id * 1000), nguyen.SAMPLE_SIZE)
+            X, y = sample(spec, np.random.default_rng(seed + spec_id * 1000), n_train)
             X_test, y_test = sample(spec, np.random.default_rng(10_000 + seed + spec_id * 1000), nguyen.SAMPLE_SIZE)
             if spec.get("dev_log"):
                 scale = float(np.std(y)) or 1.0
@@ -476,6 +519,13 @@ def run_task(task):
         ss_tot = np.sum((y_test - y_test.mean()) ** 2)
         row.update(train_r2=float("nan") if train_r2 is None else float(train_r2), size=best.size(), gens_used=len(curve), best_expr=best.to_string(),
                    test_r2=float(1 - np.sum((y_test - pred) ** 2) / ss_tot) if np.all(np.isfinite(pred)) else float("nan"))
+        if 101 <= spec_id <= 115:  # Keijzer only (benchmark_of also counts the 200-400 dev ids)
+            Xk = keijzer_test_set(spec_id - 100)
+            with np.errstate(all="ignore"):
+                yk = np.asarray(spec["func"](*Xk.T), dtype=float)
+                pk = best.evaluate({n: Xk[:, i] for i, n in enumerate(names)})
+            row["test_r2_orig"] = float(1 - np.sum((yk - pk) ** 2) / np.sum((yk - yk.mean()) ** 2)) \
+                if np.all(np.isfinite(pk)) else float("nan")
         row["elapsed_sec"] = round(time.time() - t0, 2)  # GA time only, excludes the recovery check
         model = scale * best.to_sympy()
         row["recovered"] = int(_Checker.call("is_recovered", model, spec["sympy"], physical="srsd" in spec or bool(spec.get("dev_log"))))
@@ -499,7 +549,10 @@ def main():
     pa.add_argument("--jobs", type=int, default=8)
     pa.add_argument("--tag", default="main", help="output file name prefix")
     pa.add_argument("--selftest", action="store_true", help="run SELFTEST and print one JSON line per run")
+    pa.add_argument("--protocol", choices=["paper", "orig"], default="paper",
+                    help="orig: Nguyen with the original 20 points and ranges (NGUYEN_ORIG_RANGES)")
     args = pa.parse_args()
+    os.environ["RLLXO_PROTOCOL"] = args.protocol  # workers are spawned and inherit the environment
     if args.selftest:
         return selftest()
 
