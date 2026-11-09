@@ -36,3 +36,6 @@ tmp_*.json
 # --- Optuna / SQLite studies ---
 *.db
 *.db-journal
+baselines/tasks/
+baselines/pysr_out/
+.venv-pysr/
