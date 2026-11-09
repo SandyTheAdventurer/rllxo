@@ -39,7 +39,7 @@ for _k, _v in {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THR
     os.environ.setdefault(_k, _v)
 import argparse, atexit, csv, ctypes, json, multiprocessing as mp, pickle, signal, subprocess, sys, threading, time
 from pathlib import Path
-import numpy as np, sympy as sp, torch
+import numpy as np, sympy as sp  # torch loads in run_task, so the recovery-check helper stays small
 
 ARMS = {
     "random": {"use_learned_crossover": False},
@@ -435,6 +435,7 @@ def _checker_main():
 
 def run_task(task):
     arm, spec_id, seed = task
+    import torch
     torch.set_num_threads(1)
     _limit_memory(3 << 30)
     import nguyen
