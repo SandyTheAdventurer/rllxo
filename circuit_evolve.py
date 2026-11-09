@@ -139,48 +139,68 @@ def solve_dc(top: Topology, v_in: float = 1.0) -> float | None:
 
 TARGET_RESISTANCE = 100.0  # Target: 100 ohms
 
-def prune_unused(top: Topology) -> Topology:
-    """Remove resistors not on any V+ to GND path."""
-    # BFS to find nodes reachable from V+ (node 0)
+def _connected_to_vplus(top: Topology) -> set:
+    """Nodes connected to V+ (node 0) through any resistors."""
     adj = {i: set() for i in range(top.num_nodes)}
     for r in top.resistors:
         adj[r.n1].add(r.n2)
         adj[r.n2].add(r.n1)
-    
-    def reachable(start: int) -> set:
-        visited = {start}
-        queue = [start]
-        while queue:
-            n = queue.pop(0)
-            for nb in adj[n]:
-                if nb not in visited:
-                    visited.add(nb)
-                    queue.append(nb)
-        return visited
-    
-    from_vplus = reachable(0)
-    from_gnd = reachable(1)
-    useful_nodes = from_vplus & from_gnd
-    
-    # Keep only resistors where both nodes are useful
-    kept = [r for r in top.resistors if r.n1 in useful_nodes and r.n2 in useful_nodes]
+    seen, queue = {0}, [0]
+    while queue:
+        for nb in adj[queue.pop()]:
+            if nb not in seen:
+                seen.add(nb)
+                queue.append(nb)
+    return seen
+
+
+def branch_currents(top: Topology, v_in: float = 1.0) -> list[float] | None:
+    """Current through each resistor with v_in across V+ (node 0) and GND (node 1), or None if they are not
+    connected. Resistors outside the V+/GND component carry no current."""
+    comp = _connected_to_vplus(top)
+    if 1 not in comp:
+        return None
+    unknowns = sorted(comp - {0, 1})
+    nmap = {n: i for i, n in enumerate(unknowns)}
+    G, I = np.zeros((len(unknowns), len(unknowns))), np.zeros(len(unknowns))
+    fixed = {0: v_in, 1: 0.0}
+    for r in top.resistors:
+        if r.n1 not in comp:
+            continue
+        g = 1.0 / max(r.value, 1e-9)
+        for a, b in ((r.n1, r.n2), (r.n2, r.n1)):
+            if a in nmap:
+                G[nmap[a], nmap[a]] += g
+                if b in nmap:
+                    G[nmap[a], nmap[b]] -= g
+                else:
+                    I[nmap[a]] += g * fixed[b]
+    try:
+        v = np.linalg.solve(G, I) if unknowns else np.zeros(0)
+    except np.linalg.LinAlgError:
+        return None
+    volt = {**fixed, **{n: v[i] for n, i in nmap.items()}}
+    return [(volt[r.n1] - volt[r.n2]) / max(r.value, 1e-9) if r.n1 in comp else 0.0 for r in top.resistors]
+
+
+def prune_unused(top: Topology) -> Topology:
+    """Remove resistors that carry no current between V+ and GND: dangling branches, floating parts and
+    resistors not connected to the terminals. (The previous reachability test kept a dangling branch off
+    V+, because GND reaches it through V+.)"""
+    cur = branch_currents(top)
+    if cur is None:
+        return top  # V+ and GND are not connected; solve_dc reports the failure
+    peak = max((abs(c) for c in cur), default=0.0)
+    kept = [r for r, c in zip(top.resistors, cur) if abs(c) > 1e-9 * peak]
     if not kept:
-        return top  # Can't prune everything
-    
-    # Renumber nodes
+        return top
     old_to_new = {0: 0, 1: 1}
-    next_id = 2
     for r in kept:
         for n in (r.n1, r.n2):
             if n not in old_to_new:
-                old_to_new[n] = next_id
-                next_id += 1
-    
-    pruned = Topology(
-        [Resistor(old_to_new[r.n1], old_to_new[r.n2], r.value) for r in kept],
-        next_id
-    )
-    return pruned
+                old_to_new[n] = len(old_to_new)
+    return Topology([Resistor(old_to_new[r.n1], old_to_new[r.n2], r.value) for r in kept], len(old_to_new))
+
 
 def evaluate_pareto(top: Topology, target: float = TARGET_RESISTANCE) -> tuple[float, int]:
     """Return (error, num_resistors) for Pareto ranking."""
