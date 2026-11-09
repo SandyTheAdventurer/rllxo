@@ -37,7 +37,7 @@ import os
 for _k, _v in {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
                "TQDM_DISABLE": "1", "RLLXO_SELECTOR_DEVICE": "cpu"}.items():
     os.environ.setdefault(_k, _v)
-import argparse, csv, ctypes, json, multiprocessing as mp, signal, threading, time
+import argparse, atexit, csv, ctypes, json, multiprocessing as mp, pickle, signal, subprocess, sys, threading, time
 from pathlib import Path
 import numpy as np, sympy as sp, torch
 
@@ -346,6 +346,91 @@ def tree_edit_distance(model: sp.Expr, target: sp.Expr, seconds=30, physical=Fal
     return ted, float(min(1.0, ted / sum(1 for _ in sp.preorder_traversal(exprs[1]))))
 
 
+
+class _Checker:
+    """is_recovered and tree_edit_distance in a helper process, killed after a hard limit.
+
+    SymPy can get stuck in one long C call (a huge integer power), which no in-process alarm can interrupt:
+    7 of the 11,340 held-out runs hung there (results/HELDOUT_DEVIATION.md). The helper starts once per
+    worker and is reused. A killed recovery check counts as not recovered, as when the 30 s alarm fires; a
+    killed TED is NaN. The limits count from the start of each call, not the helper's start-up. The helper
+    runs with PYTHONHASHSEED=0 because SymPy's results can depend on the order of hashed arguments.
+    """
+    LIMITS = {"is_recovered": (60, False), "tree_edit_distance": (150, (float("nan"), float("nan")))}
+    proc = None
+
+    @classmethod
+    def call(cls, name, *args, **kw):
+        limit, default = cls.LIMITS[name]
+        if cls.proc is None or cls.proc.poll() is not None:
+            cls.proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--checker"],
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        env={**os.environ, "PYTHONHASHSEED": "0"})
+            atexit.register(cls.proc.kill)
+            if cls._recv(600) != ("ok", "ready"):
+                raise RuntimeError("the recovery-check helper did not start")
+        cls._send(cls.proc.stdin, (name, args, kw))
+        res = cls._recv(limit)
+        if res is None:  # over the limit, or the helper died
+            cls.proc.kill()
+            cls.proc.wait()
+            cls.proc = None
+            return default
+        if res[0] == "exc":
+            raise res[1]
+        return res[1]
+
+    @staticmethod
+    def _send(f, obj):
+        b = pickle.dumps(obj)
+        f.write(len(b).to_bytes(8, "little") + b)
+        f.flush()
+
+    @staticmethod
+    def _read(f):
+        h = f.read(8)
+        if len(h) < 8:
+            raise EOFError
+        return pickle.loads(f.read(int.from_bytes(h, "little")))
+
+    @classmethod
+    def _recv(cls, timeout):
+        """The helper's next reply, or None if none arrives within timeout seconds."""
+        box = []
+
+        def read(f=cls.proc.stdout):
+            try:
+                box.append(cls._read(f))
+            except Exception:
+                pass
+        t = threading.Thread(target=read, daemon=True)
+        t.start()
+        t.join(timeout)
+        return box[0] if box else None
+
+
+def _checker_main():
+    """The helper's loop: read (name, args, kwargs), reply ("ok", result) or ("exc", exception)."""
+    _limit_memory(3 << 30)
+    inp, out = sys.stdin.buffer, sys.stdout.buffer
+    sys.stdout = sys.stderr  # keep stray prints off the reply pipe
+    _Checker._send(out, ("ok", "ready"))
+    funcs = {"is_recovered": is_recovered, "tree_edit_distance": tree_edit_distance}
+    while True:
+        try:
+            name, args, kw = _Checker._read(inp)
+        except EOFError:
+            return
+        try:
+            res = ("ok", funcs[name](*args, **kw))
+        except Exception as exc:
+            res = ("exc", exc)
+        try:
+            _Checker._send(out, res)
+        except Exception:
+            _Checker._send(out, ("exc", RuntimeError(repr(res[1]))))
+
+
 def run_task(task):
     arm, spec_id, seed = task
     torch.set_num_threads(1)
@@ -390,16 +475,18 @@ def run_task(task):
                    test_r2=float(1 - np.sum((y_test - pred) ** 2) / ss_tot) if np.all(np.isfinite(pred)) else float("nan"))
         row["elapsed_sec"] = round(time.time() - t0, 2)  # GA time only, excludes the recovery check
         model = scale * best.to_sympy()
-        row["recovered"] = int(is_recovered(model, spec["sympy"], physical="srsd" in spec or bool(spec.get("dev_log"))))
+        row["recovered"] = int(_Checker.call("is_recovered", model, spec["sympy"], physical="srsd" in spec or bool(spec.get("dev_log"))))
         # A recovered model is the true equation, whatever form simplify leaves it in
         row["ted"], row["ned"] = (0, 0.0) if row["recovered"] else \
-            tree_edit_distance(model, spec["sympy"], physical="srsd" in spec or bool(spec.get("dev_log")))
+            _Checker.call("tree_edit_distance", model, spec["sympy"], physical="srsd" in spec or bool(spec.get("dev_log")))
     except Exception as exc:
         row.update(status="error", error=repr(exc), elapsed_sec=round(time.time() - t0, 2))
     return row, curve
 
 
 def main():
+    if sys.argv[1:] == ["--checker"]:
+        return _checker_main()
     pa = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     pa.add_argument("--equations", default="6,7,12,114",
                     help="spec ids (Keijzer offset by 100) or the groups nguyen, keijzer, srsd, dev, heldout")

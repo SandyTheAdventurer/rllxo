@@ -38,6 +38,8 @@ python analyze_heldout.py results/compare_selectors/heldout.csv
 - **Output:** rows are appended to `results/compare_selectors/heldout.csv` as runs finish. An
   interrupted run resumes where it stopped when the same command is run again.
 - **Run time:** 11,340 runs take roughly 45-125 core-hours, depending on the CPU.
+- **Recovery check:** exact recovery and tree edit distance run in a helper process with a hard time limit,
+  so a SymPy simplification that runs away cannot stall a run (results/HELDOUT_DEVIATION.md).
 - **Memory:** plan on about 1 GB of RAM per worker. A run that goes over 3 GB is stopped and recorded
   with status `error`. On Windows, enforcing that limit needs psutil.
 
@@ -56,3 +58,4 @@ python compare_selectors.py --equations dev --arms random,a2c_t03,ex64_t03,dir_t
 | compare_selectors.py | equations, arms, the experiment runner, recovery and tree-edit-distance checks |
 | analyze_heldout.py | the pre-registered analysis of the held-out test |
 | results/HELDOUT_PLAN.md | the frozen plan |
+| results/HELDOUT_DEVIATION.md | what happened after the freeze: the last 9 runs and the recovery-check fix |
