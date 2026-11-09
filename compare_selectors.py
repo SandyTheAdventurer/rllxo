@@ -104,6 +104,8 @@ ARMS.update({
     "a2c_t03_fast": {**_B, "sem_mode": "exact", "sem_temp": 0.03, "selector_reward": "logratio", "selector_lr": 3e-3, "entropy_weight": 0.01},
     "a2c_t1_fast": {**_B, "sem_mode": "exact", "sem_temp": 0.1, "selector_reward": "logratio", "selector_lr": 3e-3, "entropy_weight": 0.01},
     "mlp_fast": {"selector_type": "mlp", "selector_warmup_gens": 1, "selector_reward": "logratio", "selector_lr": 3e-3, "entropy_weight": 0.01},
+    # Ablation of a2c_t03 for the revision (results/EXTRA_ARMS_PLAN.md): the same policy, warmup and reward, no H
+    "a2c_noH": {"selector_type": "mlp", "selector_warmup_gens": 1, "heuristic_bias_scale": 0.0, "selector_reward": "logratio"},
 })
 for _arm in ["random", "mlp", "ssc", "imp_sem"]:
     ARMS[f"{_arm}_m01"] = {**ARMS[_arm], "mutation_rate": 0.1}
