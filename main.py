@@ -829,7 +829,8 @@ def run_ga(
     """Evolve an expression for y. selector_type picks the learned crossover policy:
     'mlp' (per-node SubtreeSelector), 'pair' (cross-attention PairSelector), 'pretrained'
     (frozen PretrainedPairScorer loaded from selector_path), 'heuristic' (H alone, no learning)
-    or 'ssc' (semantic similarity-based crossover within ssc_bounds), or 'greedy' (an upper bound
+    or 'ssc' (semantic similarity-based crossover within ssc_bounds), 'sizefair' (size-fair crossover,
+    size_fair_pick), or 'greedy' (an upper bound
     that scores the children of greedy_trials uniform point pairs and keeps the best). selector_mix is the share of
     crossovers whose points the selector picks. internal_node_prob=0.9 makes
     non-learned crossover points Koza's (90% internal nodes, 10% leaves) instead of uniform;
@@ -899,8 +900,8 @@ def run_ga(
         pop = [simplify_node_with_timeout(ind, simplify_timeout) for ind in pop]
 
     # Initialize the crossover selector
-    if selector_type not in ('mlp', 'pair', 'pretrained', 'heuristic', 'ssc', 'greedy', 'sem'):
-        raise ValueError("selector_type must be 'mlp', 'pair', 'pretrained', 'heuristic', 'ssc' or 'greedy'")
+    if selector_type not in ('mlp', 'pair', 'pretrained', 'heuristic', 'ssc', 'greedy', 'sem', 'sizefair'):
+        raise ValueError("selector_type must be 'mlp', 'pair', 'pretrained', 'heuristic', 'ssc', 'greedy', 'sem' or 'sizefair'")
     SELECTOR_TYPE = selector_type
     SELECTOR_MIX, CROSSOVER_INPUTS, SSC_BOUNDS = float(selector_mix), inputs, tuple(ssc_bounds)
     GREEDY_TRIALS = int(greedy_trials)
@@ -1409,6 +1410,14 @@ def semantic_similarity_pick(a_nodes, b_nodes, trials=12):
     return pa, pb
 
 
+def size_fair_pick(a_nodes, b_nodes):
+    """Size-fair crossover (Langdon, 2000), size-limit form: a uniform point in the first parent, then a
+    uniform point in the second among subtrees of at most 1 + 2 * (size of the first subtree)."""
+    pa = random.choice(a_nodes)
+    limit = 1 + 2 * pa[0].size()
+    return pa, random.choice([n for n in b_nodes if n[0].size() <= limit])
+
+
 _NODE_SCORES, _NODE_SCORES_GEN = {}, None
 
 
@@ -1476,6 +1485,9 @@ def learned_subtree_crossover(
         return new_a, new_b, None
     elif use_learned and SELECTOR_TYPE == 'ssc':
         (node_a, parent_a, attr_a), (node_b, parent_b, attr_b) = semantic_similarity_pick(
+            collect_nodes_with_parents(a_clone), collect_nodes_with_parents(b_clone))
+    elif use_learned and SELECTOR_TYPE == 'sizefair':
+        (node_a, parent_a, attr_a), (node_b, parent_b, attr_b) = size_fair_pick(
             collect_nodes_with_parents(a_clone), collect_nodes_with_parents(b_clone))
     elif use_selector and isinstance(subtree_selector, SubtreeSelector):
         # The MLP's pair logit is a sum of node logits, so each parent's features and node logits

@@ -107,7 +107,17 @@ ARMS.update({
     # Ablation of a2c_t03 for the revision (results/EXTRA_ARMS_PLAN.md): the same policy, warmup and reward, no H
     "a2c_noH": {"selector_type": "mlp", "selector_warmup_gens": 1, "heuristic_bias_scale": 0.0, "selector_reward": "logratio"},
 })
-for _arm in ["random", "mlp", "ssc", "imp_sem"]:
+# Reviewer 5's ablations (results/ABLATION_NOISE_PLAN.md): a2c_t03 without its critic; a2c_t03 and random
+# without constant optimization, and at mutation rate 0.1, where crossover dominates the search; and
+# size-fair crossover (Langdon, 2000) as a second informed baseline
+ARMS.update({
+    "a2c_nocritic": {**ARMS["a2c_t03"], "use_critic": False},
+    "a2c_noconst": {**ARMS["a2c_t03"], "opt_constants": False},
+    "random_noconst": {**ARMS["random"], "opt_constants": False},
+    "a2c_m01": {**ARMS["a2c_t03"], "mutation_rate": 0.1},
+    "sizefair": {"selector_type": "sizefair", "selector_warmup_gens": 1},
+})
+for _arm in ["random", "mlp", "ssc", "imp_sem"]:  # random_m01 is reviewer 5's low-mutation baseline
     ARMS[f"{_arm}_m01"] = {**ARMS[_arm], "mutation_rate": 0.1}
 FIELDS = ["arm", "spec_id", "seed", "status", "train_r2", "test_r2", "recovered", "ted", "ned", "size",
           "gens_used", "elapsed_sec", "best_expr", "error", "test_r2_orig"]
@@ -501,6 +511,10 @@ def run_task(task):
                 n_train = NGUYEN_ORIG_POINTS
             # Same training sample as nguyen.py; the test sample is fresh points from the same ranges
             X, y = sample(spec, np.random.default_rng(seed + spec_id * 1000), n_train)
+            noise = float(os.environ.get("RLLXO_NOISE", "0"))
+            if noise:
+                # Gaussian noise on the training targets only, sd = noise * RMS(y) as in SRBench; the test set stays clean
+                y = y + np.random.default_rng(20_000 + seed + spec_id * 1000).normal(0.0, noise * np.sqrt(np.mean(y ** 2)), len(y))
             X_test, y_test = sample(spec, np.random.default_rng(10_000 + seed + spec_id * 1000), nguyen.SAMPLE_SIZE)
             if spec.get("dev_log"):
                 scale = float(np.std(y)) or 1.0
@@ -549,9 +563,12 @@ def main():
     pa.add_argument("--jobs", type=int, default=8)
     pa.add_argument("--tag", default="main", help="output file name prefix")
     pa.add_argument("--selftest", action="store_true", help="run SELFTEST and print one JSON line per run")
+    pa.add_argument("--noise", type=float, default=0.0,
+                    help="Gaussian noise on the training targets, sd = noise * RMS(y) (Nguyen, Keijzer, dev)")
     pa.add_argument("--protocol", choices=["paper", "orig"], default="paper",
                     help="orig: Nguyen with the original 20 points and ranges (NGUYEN_ORIG_RANGES)")
     args = pa.parse_args()
+    os.environ["RLLXO_NOISE"] = str(args.noise)
     os.environ["RLLXO_PROTOCOL"] = args.protocol  # workers are spawned and inherit the environment
     if args.selftest:
         return selftest()
