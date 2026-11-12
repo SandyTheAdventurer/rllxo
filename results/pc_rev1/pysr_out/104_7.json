@@ -1,0 +1,1 @@
+{"spec_id": 104, "seed": 7, "test_r2": 0.9864102491114349, "complexity": 23, "sympy": "-(x - 0.6290178)*sin(1.9972394*x)/sqrt(exp(x + cos(x + cos(2.9193292*cos(0.7974848*x)))))", "scale": 1.0, "elapsed_sec": 18.1}

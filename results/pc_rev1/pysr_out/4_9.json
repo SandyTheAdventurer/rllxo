@@ -1,0 +1,1 @@
+{"spec_id": 4, "seed": 9, "test_r2": 0.9999999999999998, "complexity": 17, "sympy": "(x - 1*(-0.99999994))*(x*x*x*(x*x - 1*(-1.0)) + x)", "scale": 1.0, "elapsed_sec": 10.07}

@@ -1,0 +1,1 @@
+{"spec_id": 2032, "seed": 8, "test_r2": -0.00033130892324417793, "complexity": 7, "sympy": "sqrt(x1)/sin(x2 + 14.210159)", "scale": 56.405322049398514, "elapsed_sec": 12.65}

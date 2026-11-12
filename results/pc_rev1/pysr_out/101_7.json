@@ -1,0 +1,1 @@
+{"spec_id": 101, "seed": 7, "test_r2": 0.9960320140536982, "complexity": 21, "sympy": "log(cos(cos(cos(cos(4.2700257*x)))))*sin(1.44597450519068*x**2 + 0.3726393) + 0.16223586", "scale": 1.0, "elapsed_sec": 18.31}

@@ -1,0 +1,1 @@
+{"spec_id": 102, "seed": 9, "test_r2": 0.9662951104480331, "complexity": 23, "sympy": "-cos(x*sin(x*sin(x)*x*(-1.0484662))) + cos(x*cos(cos(1.0260842/x))) - 1*(-0.058262456)", "scale": 1.0, "elapsed_sec": 16.85}

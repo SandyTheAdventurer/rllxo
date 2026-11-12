@@ -1,0 +1,1 @@
+{"spec_id": 101, "seed": 0, "test_r2": 0.9983215132082549, "complexity": 19, "sympy": "(sqrt(cos(cos(2.05116314693224*cos(2.06934477818952*x)))) - 0.93580157)/sqrt(cos(cos(cos(5.015081*x))))", "scale": 1.0, "elapsed_sec": 27.07}

@@ -1,0 +1,1 @@
+{"spec_id": 2017, "seed": 5, "test_r2": 0.9955871133203757, "complexity": 19, "sympy": "69.08745*sin(sin(sin(sin(sin(log(sqrt(sqrt(x0)*x1))) - 0.7239129))) - 0.7714277) + 69.007039116945", "scale": 9.949739176714411e-30, "elapsed_sec": 20.73}

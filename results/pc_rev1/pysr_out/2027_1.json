@@ -1,0 +1,1 @@
+{"spec_id": 2027, "seed": 1, "test_r2": 0.9978567558103495, "complexity": 27, "sympy": "2*x0*(-2*sin(log(x1)) - sin(log(sin(x1))) - 24.749708 + 1.6798318e-13/sqrt(x1))/x1**(1/4)", "scale": 5.506455728537285e-15, "elapsed_sec": 11.85}

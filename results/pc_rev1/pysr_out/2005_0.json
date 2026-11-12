@@ -1,0 +1,1 @@
+{"spec_id": 2005, "seed": 0, "test_r2": 1.0, "complexity": 13, "sympy": "0.0065833763*x0*x1*x2/(x2*x2*x2)", "scale": 1365217793728.8748, "elapsed_sec": 8.85}

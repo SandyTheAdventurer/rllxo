@@ -1,0 +1,1 @@
+{"spec_id": 4, "seed": 7, "test_r2": 0.9999999999999994, "complexity": 17, "sympy": "(x*x + x)*(x*x*(x*x + 0.9999992) + 1.0000077)", "scale": 1.0, "elapsed_sec": 10.27}

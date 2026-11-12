@@ -1,0 +1,1 @@
+{"spec_id": 110, "seed": 5, "test_r2": 0.996847299473962, "complexity": 17, "sympy": "cos(-x + sqrt(y) + 0.5973339*cos(y + sin(x**2 - 0.79665047)))", "scale": 1.0, "elapsed_sec": 13.96}

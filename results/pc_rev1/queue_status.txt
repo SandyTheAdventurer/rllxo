@@ -1,0 +1,15 @@
+2026-11-10 18:17:11 start extra
+2026-11-10 19:16:38 end extra rc=0 minutes=59.5
+2026-11-10 19:16:38 start keijzer_orig
+2026-11-10 19:31:09 end keijzer_orig rc=0 minutes=14.5
+2026-11-10 19:31:09 start nguyen_orig
+2026-11-10 19:38:10 end nguyen_orig rc=0 minutes=7.0
+2026-11-10 19:38:10 start ablations
+2026-11-10 20:53:41 end ablations rc=0 minutes=75.5
+2026-11-10 20:53:41 start noise01
+2026-11-10 21:21:03 end noise01 rc=0 minutes=27.4
+2026-11-10 21:21:03 start noise10
+2026-11-10 21:52:16 end noise10 rc=0 minutes=31.2
+2026-11-10 21:52:16 start circuits
+2026-11-10 21:57:29 end circuits rc=0 minutes=5.2
+2026-11-10 21:57:43 start pysr k=14

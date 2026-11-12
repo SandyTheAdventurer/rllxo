@@ -1,0 +1,1 @@
+{"spec_id": 2019, "seed": 0, "test_r2": 0.9999999767242883, "complexity": 27, "sympy": "-2.995032e-5*x1*x2*log(x0)/log(x0/x2) + 3.294169e-5*x1*x2/(sqrt(x0)*log(x0**(1/4)))", "scale": 7588.0407054485995, "elapsed_sec": 12.82}

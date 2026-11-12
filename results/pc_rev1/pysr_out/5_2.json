@@ -1,0 +1,1 @@
+{"spec_id": 5, "seed": 2, "test_r2": 0.9959439006064899, "complexity": 13, "sympy": "cos(sin(cos(cos(x*(-0.35368386)))*x*2.79346))*(-1.0183417)", "scale": 1.0, "elapsed_sec": 13.08}

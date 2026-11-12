@@ -1,0 +1,1 @@
+{"spec_id": 101, "seed": 3, "test_r2": 0.9768744974226831, "complexity": 17, "sympy": "log(cos(x*cos(4.37024735600035*x))) + 0.061997466*exp(-0.006880657/x**2)", "scale": 1.0, "elapsed_sec": 20.52}

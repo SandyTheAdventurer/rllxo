@@ -1,0 +1,1 @@
+{"spec_id": 115, "seed": 2, "test_r2": 0.9988769507096155, "complexity": 25, "sympy": "(y - sin(y))*4.8377943 - (-0.76961917*x + y) - (sin(x)*1.986983 - 1.4656475*sin(-y + sin(y)))", "scale": 1.0, "elapsed_sec": 20.11}

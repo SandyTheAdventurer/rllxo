@@ -1,0 +1,1 @@
+{"spec_id": 8, "seed": 9, "test_r2": 0.9982286703142916, "complexity": 24, "sympy": "log(6.46034144971871*x/(x + sin(sin(0.88084495*x)) + sin(sin(sin(sin(1.5013657924614*sin(x + sin(x))))))))", "scale": 1.0, "elapsed_sec": 20.71}

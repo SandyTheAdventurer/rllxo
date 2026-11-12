@@ -1,0 +1,1 @@
+{"spec_id": 11, "seed": 2, "test_r2": 1.0, "complexity": 5, "sympy": "exp(y*log(x))", "scale": 1.0, "elapsed_sec": 15.69}

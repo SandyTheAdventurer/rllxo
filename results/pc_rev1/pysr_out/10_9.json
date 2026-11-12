@@ -1,0 +1,1 @@
+{"spec_id": 10, "seed": 9, "test_r2": 1.0, "complexity": 7, "sympy": "sin(x)*2.0*cos(y)", "scale": 1.0, "elapsed_sec": 15.13}

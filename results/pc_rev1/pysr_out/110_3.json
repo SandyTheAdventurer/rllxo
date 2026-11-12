@@ -1,0 +1,1 @@
+{"spec_id": 110, "seed": 3, "test_r2": 0.9954457955648509, "complexity": 19, "sympy": "sin((x + exp(-exp(y) + exp(-exp(x) - exp(y) + 2.0381992)))/0.79098886 - 0.16828896)", "scale": 1.0, "elapsed_sec": 19.07}

@@ -1,0 +1,1 @@
+{"spec_id": 112, "seed": 2, "test_r2": 0.9999992407139876, "complexity": 26, "sympy": "x*x*x*(x - y/y) - (y - (-15.460931)*cos(y/3.839414) - 1*14.437647) + y/y", "scale": 1.0, "elapsed_sec": 13.03}

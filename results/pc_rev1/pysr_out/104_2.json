@@ -1,0 +1,1 @@
+{"spec_id": 104, "seed": 2, "test_r2": 0.9859313480664427, "complexity": 17, "sympy": "sin(2*x)*sin(sin(sin(sin(2.7438843*sqrt(x)) - 2.3379285) - 2.0744238))", "scale": 1.0, "elapsed_sec": 33.18}

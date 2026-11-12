@@ -1,0 +1,1 @@
+{"spec_id": 102, "seed": 0, "test_r2": 0.9999999999305917, "complexity": 8, "sympy": "x*0.29999924*sin(x*6.2831793)", "scale": 1.0, "elapsed_sec": 18.34}

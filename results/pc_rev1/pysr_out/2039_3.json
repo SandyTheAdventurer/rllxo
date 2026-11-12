@@ -1,0 +1,1 @@
+{"spec_id": 2039, "seed": 3, "test_r2": 0.242858126415461, "complexity": 14, "sympy": "sqrt(exp(cos(log(x1) - cos(0.692545294414718*log(x0**2)))))", "scale": 0.36509892533581373, "elapsed_sec": 19.32}

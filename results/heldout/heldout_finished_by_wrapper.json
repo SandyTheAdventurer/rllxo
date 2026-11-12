@@ -1,0 +1,71 @@
+[
+ {
+  "arm": "a2c_t03",
+  "spec_id": 2014,
+  "seed": 8,
+  "hard_killed": [
+   "is_recovered"
+  ]
+ },
+ {
+  "arm": "a2c_t03",
+  "spec_id": 2028,
+  "seed": 25,
+  "hard_killed": [
+   "is_recovered"
+  ]
+ },
+ {
+  "arm": "a2c_t03",
+  "spec_id": 2033,
+  "seed": 10,
+  "hard_killed": [
+   "is_recovered"
+  ]
+ },
+ {
+  "arm": "dir_t03",
+  "spec_id": 2026,
+  "seed": 15,
+  "hard_killed": []
+ },
+ {
+  "arm": "ex64_t03",
+  "spec_id": 11,
+  "seed": 24,
+  "hard_killed": [
+   "is_recovered",
+   "tree_edit_distance"
+  ]
+ },
+ {
+  "arm": "ex64_t03",
+  "spec_id": 2021,
+  "seed": 16,
+  "hard_killed": [
+   "is_recovered"
+  ]
+ },
+ {
+  "arm": "mlp",
+  "spec_id": 2008,
+  "seed": 8,
+  "hard_killed": [
+   "is_recovered"
+  ]
+ },
+ {
+  "arm": "mlp",
+  "spec_id": 2009,
+  "seed": 21,
+  "hard_killed": []
+ },
+ {
+  "arm": "random_x4",
+  "spec_id": 2014,
+  "seed": 26,
+  "hard_killed": [
+   "is_recovered"
+  ]
+ }
+]

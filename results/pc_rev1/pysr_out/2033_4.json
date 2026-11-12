@@ -1,0 +1,1 @@
+{"spec_id": 2033, "seed": 4, "test_r2": -4.4410696406179175, "complexity": 30, "sympy": "exp(x2*sin(sin(x3)))*exp(x2*sin(sin(x3)))*sin(exp(x2)/69.84853)*7.20024e-5/(x3*sin(x2)*sin(sin(x2)))", "scale": 2.5428845503299077e+34, "elapsed_sec": 20.98}

@@ -1,0 +1,1 @@
+{"spec_id": 2021, "seed": 1, "test_r2": 0.03645668145538827, "complexity": 10, "sympy": "log(sin(x0))/(-x0 + cos(log(log(x0))))", "scale": 413.9976737408491, "elapsed_sec": 23.86}

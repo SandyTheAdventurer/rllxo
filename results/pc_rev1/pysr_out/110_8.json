@@ -1,0 +1,1 @@
+{"spec_id": 110, "seed": 8, "test_r2": 0.9979794135392636, "complexity": 30, "sympy": "cos(-x + sin(sin(y)) + sin(sin(0.570805276145378*exp(x) + sin(y + sin(sin(sin(sin(y*exp(-x + y))))) - 0.03350143))))", "scale": 1.0, "elapsed_sec": 18.98}

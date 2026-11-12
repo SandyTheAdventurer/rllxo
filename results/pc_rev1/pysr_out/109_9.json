@@ -1,0 +1,1 @@
+{"spec_id": 109, "seed": 9, "test_r2": 1.0, "complexity": 9, "sympy": "log(x + sqrt(x**2 + 1.0))", "scale": 1.0, "elapsed_sec": 10.3}

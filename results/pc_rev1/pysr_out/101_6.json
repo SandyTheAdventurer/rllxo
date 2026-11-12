@@ -1,0 +1,1 @@
+{"spec_id": 101, "seed": 6, "test_r2": 0.9923623660210331, "complexity": 20, "sympy": "sin(sin(cos(sin(-(cos((x + sin(x))*1.1870496) + cos(x + x)) - 1.6802132))) - 0.75572044)", "scale": 1.0, "elapsed_sec": 22.77}

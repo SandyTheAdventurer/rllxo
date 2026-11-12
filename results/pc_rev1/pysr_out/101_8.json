@@ -1,0 +1,1 @@
+{"spec_id": 101, "seed": 8, "test_r2": 0.9999999999817638, "complexity": 12, "sympy": "sin(x + (x + x)*(-3.6415906))*x*(-0.30000037)", "scale": 1.0, "elapsed_sec": 12.53}

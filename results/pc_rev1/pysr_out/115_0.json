@@ -1,0 +1,1 @@
+{"spec_id": 115, "seed": 0, "test_r2": 0.9980231439204581, "complexity": 24, "sympy": "(y - sin(y)/0.7116418)*2.0515282/cos(cos(sin(sin(sin(y))))) - sin(x/0.72324914)/exp(cos(x))", "scale": 1.0, "elapsed_sec": 29.64}

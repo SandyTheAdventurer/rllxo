@@ -1,0 +1,1 @@
+{"spec_id": 110, "seed": 4, "test_r2": 0.9984888809261635, "complexity": 18, "sympy": "cos((2.3993945 - x)*sin(sin(sin(sin(-y*(1.1061814 - x) - 0.26161408))))) - 1*(-0.07577253)", "scale": 1.0, "elapsed_sec": 17.35}

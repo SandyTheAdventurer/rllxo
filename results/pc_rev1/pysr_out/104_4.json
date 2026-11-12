@@ -1,0 +1,1 @@
+{"spec_id": 104, "seed": 4, "test_r2": 0.9766599847143098, "complexity": 25, "sympy": "sin(x - sin(sin(sin(x))))*sin(sin(sqrt(x)*sin(sqrt(x))**2*sin(x - 1.555425)))", "scale": 1.0, "elapsed_sec": 30.02}

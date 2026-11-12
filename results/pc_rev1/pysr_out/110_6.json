@@ -1,0 +1,1 @@
+{"spec_id": 110, "seed": 6, "test_r2": 0.9983504063807632, "complexity": 25, "sympy": "sin((x - 1*(-0.039931204))/(((x + y*y*0.5595448*cos(x + x) + y*0.39818516)*cos(sin(x)))))", "scale": 1.0, "elapsed_sec": 13.79}

@@ -1,0 +1,1 @@
+{"spec_id": 2024, "seed": 9, "test_r2": -19955.553983302565, "complexity": 26, "sympy": "0.456809*0.04910004/sin(sin(x3)*sin(x3/x3)/cos(sin(x3/sin(x3))/((0.456809/sin(x3/x3)))))", "scale": 1.3538798923618405e-07, "elapsed_sec": 36.88}

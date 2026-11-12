@@ -1,0 +1,1 @@
+{"spec_id": 2029, "seed": 5, "test_r2": -15.048444140542937, "complexity": 8, "sympy": "x2/(-x2 + sin(-x1 + x2))", "scale": 2.617280175455405e-20, "elapsed_sec": 12.79}

@@ -1,0 +1,1 @@
+{"spec_id": 104, "seed": 8, "test_r2": 0.990261911340235, "complexity": 25, "sympy": "-0.5376527*(sin(x**(1/4)) - 0.56335086*cos(x - sin(1.8525625*x)))*sin(sqrt(x))*sin(1.9953954*x)", "scale": 1.0, "elapsed_sec": 27.23}

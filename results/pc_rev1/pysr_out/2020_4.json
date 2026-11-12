@@ -1,0 +1,1 @@
+{"spec_id": 2020, "seed": 4, "test_r2": 0.9983636912805722, "complexity": 18, "sympy": "exp(2.21162802903882*cos(log(sqrt(x0)) + 0.8065444) + 2.6273646*cos(1.9257036*sqrt(log(x1))))", "scale": 1.0855866541629921e-06, "elapsed_sec": 23.15}

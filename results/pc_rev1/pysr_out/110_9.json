@@ -1,0 +1,1 @@
+{"spec_id": 110, "seed": 9, "test_r2": 0.9944712227547016, "complexity": 21, "sympy": "cos(-(-x + cos(cos(cos(-(y + y) + cos(x + 0.21032833)))) + 0.72305083) + cos(y + 0.7916286))", "scale": 1.0, "elapsed_sec": 15.96}

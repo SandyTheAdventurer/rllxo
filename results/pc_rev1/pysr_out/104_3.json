@@ -1,0 +1,1 @@
+{"spec_id": 104, "seed": 3, "test_r2": 0.9919872524148909, "complexity": 21, "sympy": "sin(x + x)*sin(sin(x*(-0.23251027)/(x*(-0.6458089) + exp(x)/(x*x))))", "scale": 1.0, "elapsed_sec": 17.2}

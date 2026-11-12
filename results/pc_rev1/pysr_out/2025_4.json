@@ -1,0 +1,1 @@
+{"spec_id": 2025, "seed": 4, "test_r2": 0.9997972041839217, "complexity": 30, "sympy": "6.1323953*x0*(log(0.98091537*x2) + sin(log(2.7829661*x2)) + sin(log(3.2598424*x2)) + sin(sin(sin(2.0779374*log(x2)))))/x1", "scale": 104204628.39463106, "elapsed_sec": 17.4}

@@ -1,0 +1,1 @@
+{"spec_id": 2024, "seed": 5, "test_r2": -6.05712404798473, "complexity": 17, "sympy": "exp(exp(-(sin(x4) + sin(exp(x4/x3))) - sin(x4) - 0.7919972) - 6.5152793)", "scale": 7.281317286819196e-09, "elapsed_sec": 41.61}

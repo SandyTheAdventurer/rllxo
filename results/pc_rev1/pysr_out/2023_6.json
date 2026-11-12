@@ -1,0 +1,1 @@
+{"spec_id": 2023, "seed": 6, "test_r2": 0.9182294742832023, "complexity": 27, "sympy": "0.8306645*(sqrt(exp(-x0 + x1) + exp(x0 - x1) + exp(x2 - x3) + exp(-x2)*exp(x3)) - 1.9803941)**(1/4)", "scale": 3.570227701134243, "elapsed_sec": 11.51}

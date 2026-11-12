@@ -1,0 +1,1 @@
+{"spec_id": 104, "seed": 5, "test_r2": 0.98642523452047, "complexity": 24, "sympy": "(-(sin(sin(x*(-0.39556187))*2.2513895) - 0.18092877) + sin(sin(-x - 1.4904952)))*sin(cos(x))*cos(-x - 1.566619)", "scale": 1.0, "elapsed_sec": 28.92}

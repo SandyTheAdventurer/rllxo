@@ -1,0 +1,1 @@
+{"spec_id": 110, "seed": 0, "test_r2": 0.9990251493083399, "complexity": 22, "sympy": "2.20564614003014*y*exp(-y/(x + 0.24375215))/(y/cos(cos(y/sqrt(cos(x)))) + 0.026360082)", "scale": 1.0, "elapsed_sec": 16.19}

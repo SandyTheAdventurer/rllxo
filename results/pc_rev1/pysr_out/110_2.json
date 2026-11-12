@@ -1,0 +1,1 @@
+{"spec_id": 110, "seed": 2, "test_r2": 0.9973911615504666, "complexity": 21, "sympy": "cos(cos(x*sin(x*y)) - 1.05179*cos(-x + sqrt(sin(y - 0.09563581)) + 1.2490417))", "scale": 1.0, "elapsed_sec": 13.93}

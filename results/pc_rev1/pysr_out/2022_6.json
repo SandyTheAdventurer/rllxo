@@ -1,0 +1,1 @@
+{"spec_id": 2022, "seed": 6, "test_r2": 0.9998931910069496, "complexity": 17, "sympy": "exp(-4.073825*sin(log(1.1913208*sqrt(sqrt(x0) + x0*x1**(3/2)))))", "scale": 2.297806375027412e-11, "elapsed_sec": 18.1}

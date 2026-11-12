@@ -1,0 +1,1 @@
+{"spec_id": 102, "seed": 8, "test_r2": 0.9705268924519017, "complexity": 15, "sympy": "cos(cos(x)/0.6667964)*cos(cos(x/0.79950637)/(-0.18426837))*0.4781787", "scale": 1.0, "elapsed_sec": 16.27}

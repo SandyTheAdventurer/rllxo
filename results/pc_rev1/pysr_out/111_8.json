@@ -1,0 +1,1 @@
+{"spec_id": 111, "seed": 8, "test_r2": 0.9999999999999997, "complexity": 14, "sympy": "x*y + cos(x*y - x - y - 0.57079625)", "scale": 1.0, "elapsed_sec": 13.45}

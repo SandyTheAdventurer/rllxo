@@ -1,0 +1,1 @@
+{"spec_id": 104, "seed": 0, "test_r2": 0.9821025277977175, "complexity": 22, "sympy": "-(x - sin(x))*(sin(2*x) + 0.03654216)*sin(3.17339713105681/sqrt(exp(1.5274991*x)))", "scale": 1.0, "elapsed_sec": 26.65}
