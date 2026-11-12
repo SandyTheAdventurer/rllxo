@@ -28,7 +28,7 @@ Equations: Nguyen 1-12, Keijzer 101-115, SRSD-Feynman medium 2000-2039 (dataset/
 Usage: python compare_selectors.py [--equations 6,7,12,114|nguyen,keijzer,srsd|dev|heldout] [--arms ...] [--seeds 30] [--jobs 12]
        python compare_selectors.py --selftest    (six short dev runs printed as JSON, to compare machines)
 
-Runs on Linux, macOS and Windows; see REPRODUCE.md.
+Runs on Linux, macOS and Windows; see README.md.
 """
 from __future__ import annotations
 import os
