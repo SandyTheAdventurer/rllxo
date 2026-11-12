@@ -1,3 +1,5 @@
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))  # main.py lives in the repo root
 from main import run_ga, set_global_seed, simplify_equation
 import pandas as pd
 import numpy as np

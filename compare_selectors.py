@@ -7,7 +7,7 @@ Arms (all share the paper's GA config from nguyen.py):
   mlp_noH    per-node MLP selector, gamma = 0
   pair       cross-attention PairSelector + H
   pair_noH   cross-attention PairSelector, gamma = 0
-  pretrained frozen pair scorer pretrained offline on other equations (pretrain_selector.py)
+  pretrained frozen pair scorer pretrained offline on other equations (legacy/pretrain_selector.py)
   pretrained_T05  the same at sampling temperature 0.5
   pretrained_imp(_T2)  scorer trained to predict a child beating the better parent (temperature 1 / 2)
   imp_mix50/25    that scorer picks the points of 50% / 25% of crossovers, the rest uniform
@@ -48,12 +48,12 @@ ARMS = {
     "mlp_noH": {"selector_type": "mlp", "heuristic_bias_scale": 0.0},
     "pair": {"selector_type": "pair"},
     "pair_noH": {"selector_type": "pair", "heuristic_bias_scale": 0.0},
-    # Frozen scorer from pretrain_selector.py, acting from generation 1 with no H
+    # Frozen scorer from legacy/pretrain_selector.py, acting from generation 1 with no H
     "pretrained": {"selector_type": "pretrained", "selector_path": "results/pretrain/selector.pt",
                    "selector_warmup_gens": 1, "heuristic_bias_scale": 0.0},
     "pretrained_T05": {"selector_type": "pretrained", "selector_path": "results/pretrain/selector.pt",
                        "selector_warmup_gens": 1, "heuristic_bias_scale": 0.0, "temperature": 0.5},
-    # Same, trained to predict that a child beats the better parent (pretrain_selector.py --label improves)
+    # Same, trained to predict that a child beats the better parent (legacy/pretrain_selector.py --label improves)
     "pretrained_imp": {"selector_type": "pretrained", "selector_path": "results/pretrain/selector_improves.pt",
                        "selector_warmup_gens": 1, "heuristic_bias_scale": 0.0},
     "pretrained_imp_T2": {"selector_type": "pretrained", "selector_path": "results/pretrain/selector_improves.pt",

@@ -585,7 +585,7 @@ def pair_inputs(fa: torch.Tensor, fb: torch.Tensor) -> torch.Tensor:
 
 
 class PretrainedPairScorer(nn.Module):
-    """Frozen pair scorer trained offline (pretrain_selector.py) on crossovers from other
+    """Frozen pair scorer trained offline (legacy/pretrain_selector.py) on crossovers from other
     equations: logit that a node pair gives a good crossover (the label it was trained on). A
     scorer trained with semantic channels also sees the two subtrees' semantic distance."""
 

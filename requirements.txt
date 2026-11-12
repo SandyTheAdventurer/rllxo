@@ -10,4 +10,5 @@ tqdm>=4.66
 zss==1.2.0
 six>=1.16
 psutil>=5.9
+matplotlib>=3.8
 huggingface_hub>=0.24

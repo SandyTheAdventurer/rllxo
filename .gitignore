@@ -39,3 +39,18 @@ tmp_*.json
 baselines/tasks/
 baselines/pysr_out/
 .venv-pysr/
+
+# --- Local only: never publish ---
+client.py
+
+# --- Local run outputs (the published results are in results/heldout, results/pc_rev1, results/eval_count) ---
+figures/
+results/compare_selectors/
+results/circuits/
+results/*.log
+results/queue_status.txt
+results/pretrain*/
+results/diagnostics/
+results/selector_dev/
+baselines/pysr.csv
+results/pc_rev1/compare_selectors/*.log
